@@ -4,17 +4,28 @@ const assert = std.debug.assert;
 const tracy = @import("tracy");
 const Zone = tracy.Zone;
 const Ktx2 = @import("Ktx2");
-const EncodedImage = @import("EncodedImage.zig");
-const CompressedImage = @import("CompressedImage.zig");
 const Image = @import("Image.zig");
 const Texture = @This();
 
-encoding: EncodedImage.Encoding,
+// XXX: sort this out
+alpha_is_transparency: bool,
+// XXX: merge with alpha is transparency
+alpha_test: ?AlphaTest,
 width: u32,
 height: u32,
-alpha_is_transparency: bool,
-compressed_levels: std.BoundedArray(CompressedImage, Ktx2.max_levels),
-supercompression: Ktx2.Header.SupercompressionScheme,
+levels: std.BoundedArray(Image, Ktx2.max_levels),
+
+pub const AlphaTest = struct {
+    threshold: f32,
+    max_steps: u8,
+    coverage: f32,
+};
+
+// XXX: make helper function or no?
+pub const SupercompressionOptions = union(enum) {
+    zlib: Image.CompressZlibOptions,
+    none: void,
+};
 
 pub const InitError = error{
     StbImageFailure,
@@ -26,9 +37,9 @@ pub const InitError = error{
     UnfinishedBits,
     StreamTooLong,
 };
-pub const InitOptions = struct {
+pub const InitFromImageOptions = struct {
     alpha_is_transparency: bool = true,
-    encoding: EncodedImage.Options,
+    encoding: Image.EncodeOptions,
     max_threads: ?u16 = null,
     generate_mipmaps: bool = false,
     alpha_test: ?struct {
@@ -40,208 +51,207 @@ pub const InitOptions = struct {
     max_height: u32 = std.math.maxInt(u32),
     address_mode_u: Image.AddressMode,
     address_mode_v: Image.AddressMode,
-    supercompression: CompressedImage.Options = .none,
+    supercompression: SupercompressionOptions = .none,
     filter: Image.Filter = .mitchell,
     filter_u: ?Image.Filter = null,
     filter_v: ?Image.Filter = null,
 
-    pub fn filterU(self: @This()) Image.Filter {
+    // XXX: still used? these params in general?
+    fn filterU(self: @This()) Image.Filter {
         return self.filter_u orelse self.filter;
     }
 
-    pub fn filterV(self: @This()) Image.Filter {
+    fn filterV(self: @This()) Image.Filter {
         return self.filter_v orelse self.filter;
     }
 };
 
-pub fn initFromReader(
-    gpa: std.mem.Allocator,
-    reader: anytype,
-    options: InitOptions,
-) (@TypeOf(reader).Error || InitError)!Texture {
-    const encoding: EncodedImage.Encoding = options.encoding;
-    var image = try Image.initFromReader(gpa, reader, encoding.colorSpace());
-    defer image.deinit();
-    return try initFromImage(gpa, &image, options);
-}
-
-pub fn initFromImage(
-    gpa: std.mem.Allocator,
-    image: *Image,
-    options: InitOptions,
-) InitError!Texture {
+// XXX: don't do processing in here, but have helper that can do default processing or whatever if
+// wanted
+// XXX: make it fromImages and allow multiple?
+pub fn initFromImage(image: *Image, options: InitFromImageOptions) InitError!Texture {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
-    defer image.deinit();
 
-    // Get the encoding tag
-    const encoding: EncodedImage.Encoding = options.encoding;
-
-    // Create an array of mip levels.
-    var raw_levels: std.BoundedArray(Image, Ktx2.max_levels) = .{};
-    defer for (raw_levels.slice()) |*level| level.deinit();
-
-    // Generate the first level of the mip
-    const alpha_coverage, const width, const height = b: {
-        const first_level_zone = Zone.begin(.{ .name = "process first level", .src = @src() });
-        defer first_level_zone.end();
-
-        // Premultiply alpha if it represents transparency.
-        if (options.alpha_is_transparency) image.premultiply();
-
-        // Calculate the alpha coverage if requested
-        const alpha_coverage = if (options.alpha_test) |alpha_test|
-            image.alphaCoverage(alpha_test.threshold, 1.0)
-        else
-            null;
-
-        // Resize the image if requested
-        try image.resizeToFit(.{
-            .max_size = options.max_size,
-            .max_width = options.max_width,
-            .max_height = options.max_height,
-            .address_mode_u = options.address_mode_u,
-            .address_mode_v = options.address_mode_v,
-            .filter_u = options.filterU(),
-            .filter_v = options.filterV(),
-        });
-
-        // Store the first mip level
-        const width = image.width;
-        const height = image.height;
-        raw_levels.appendAssumeCapacity(image.toOwned());
-
-        // Break with the alpha coverage
-        break :b .{ alpha_coverage, width, height };
-    };
-
-    // Generate any other requested mipmaps.
-    if (options.generate_mipmaps) {
-        const mipmap_zone = Zone.begin(.{ .name = "generate mipmaps", .src = @src() });
-        defer mipmap_zone.end();
-
-        var generate_mipmaps = raw_levels.get(0).generateMipmaps(.{
-            .address_mode_u = options.address_mode_u,
-            .address_mode_v = options.address_mode_v,
-            .filter_u = options.filterU(),
-            .filter_v = options.filterV(),
-            .block_size = encoding.blockSize(),
-        });
-
-        while (try generate_mipmaps.next()) |mipmap| {
-            raw_levels.appendAssumeCapacity(mipmap);
-        }
-    }
-
-    // Preserve alpha coverage for alpha tested textures. Technically we could skip the first level
-    // if no resizing was done, but for simplicity's sake we don't.
-    if (options.alpha_test) |alpha_test| {
-        const mipmap_zone = Zone.begin(.{ .name = "alpha test", .src = @src() });
-        defer mipmap_zone.end();
-        for (raw_levels.constSlice()) |level| {
-            level.preserveAlphaCoverage(.{
-                .threshold = alpha_test.threshold,
-                .coverage = alpha_coverage.?, // Always present if alpha test is set
-                .max_steps = alpha_test.max_steps,
-            });
-        }
-    }
-
-    // Encode the pixel data, consuming the raw level data in the process
-    var encoded_levels: std.BoundedArray(EncodedImage, Ktx2.max_levels) = .{};
-    defer for (encoded_levels.slice()) |*level| level.deinit();
-    {
-        const encode_zone = Zone.begin(.{ .name = "encode", .src = @src() });
-        defer encode_zone.end();
-        for (raw_levels.slice()) |*raw_level| {
-            encoded_levels.appendAssumeCapacity(try EncodedImage.init(
-                gpa,
-                raw_level,
-                options.max_threads,
-                options.encoding,
-            ));
-        }
-        raw_levels.clear();
-    }
-
-    // Compress the data if needed
-    var compressed_levels: std.BoundedArray(CompressedImage, Ktx2.max_levels) = .{};
-    defer for (compressed_levels.slice()) |*level| level.deinit();
-    {
-        const compress_zone = Zone.begin(.{ .name = "compress", .src = @src() });
-        defer compress_zone.end();
-        for (encoded_levels.slice()) |*encoded_level| {
-            compressed_levels.appendAssumeCapacity(try CompressedImage.init(
-                gpa,
-                encoded_level,
-                options.supercompression,
-            ));
-        }
-        encoded_levels.clear();
-    }
-
-    return .{
-        .encoding = encoding,
-        .width = width,
-        .height = height,
+    var result: @This() = .{
+        .width = image.width,
+        .height = image.height,
         .alpha_is_transparency = options.alpha_is_transparency,
-        .compressed_levels = b: {
-            const moved = compressed_levels;
-            compressed_levels.clear();
-            break :b moved;
-        },
-        .supercompression = switch (options.supercompression) {
-            .none => .none,
-            .zlib => .zlib,
-        },
+        .levels = .{},
+        .alpha_test = null,
     };
+    errdefer result.deinit();
+
+    if (options.alpha_is_transparency) {
+        image.rgbaF32Premultiply();
+    }
+
+    if (options.alpha_test) |alpha_test| {
+        result.alpha_test = .{
+            .coverage = image.rgbaF32AlphaCoverage(alpha_test.threshold, 1.0),
+            .threshold = alpha_test.threshold,
+            .max_steps = alpha_test.max_steps,
+        };
+    }
+
+    // Resize the image if requested
+    try image.rgbaF32ResizeToFit(.{
+        .max_size = options.max_size,
+        .max_width = options.max_width,
+        .max_height = options.max_height,
+        .address_mode_u = options.address_mode_u,
+        .address_mode_v = options.address_mode_v,
+        .filter_u = options.filterU(),
+        .filter_v = options.filterV(),
+    });
+
+    // XXX: hmm we could store this on image instead, and automatically do it while resizing idk
+    if (result.alpha_test) |alpha_test| {
+        image.rgbaF32PreserveAlphaCoverage(.{
+            .threshold = alpha_test.threshold,
+            .coverage = alpha_test.coverage,
+            .max_steps = alpha_test.max_steps,
+        });
+    }
+
+    // XXX: to owned?
+    result.levels.appendAssumeCapacity(image.toOwned());
+    return result;
 }
 
 pub fn deinit(self: *@This()) void {
-    for (self.compressed_levels.slice()) |*compressed_level| {
+    for (self.levels.slice()) |*compressed_level| {
         compressed_level.deinit();
     }
     self.* = undefined;
 }
 
+pub const GenerateMipMapsOptions = struct {
+    address_mode_u: Image.AddressMode,
+    address_mode_v: Image.AddressMode,
+    filter: Image.Filter = .mitchell,
+    filter_u: ?Image.Filter = null,
+    filter_v: ?Image.Filter = null,
+    // XXX: allow limiting count, and calculating optimal count for final encoding instead?
+    block_size: u8,
+
+    fn filterU(self: @This()) Image.Filter {
+        return self.filter_u orelse self.filter;
+    }
+
+    fn filterV(self: @This()) Image.Filter {
+        return self.filter_v orelse self.filter;
+    }
+};
+
+pub fn rgbaF32GenerateMipmaps(self: *@This(), options: GenerateMipMapsOptions) Image.ResizeError!void {
+    const zone = Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    if (self.levels.len != 1) @panic("generate mipmaps requires exactly one level");
+    const source = self.levels.get(0);
+    source.assertIsUncompressedRgbaF32();
+
+    // XXX: do we really need this iterator to be built into image?
+    var generate_mipmaps = source.rgbaF32GenerateMipmaps(.{
+        .address_mode_u = options.address_mode_u,
+        .address_mode_v = options.address_mode_v,
+        .filter_u = options.filterU(),
+        .filter_v = options.filterV(),
+        .block_size = options.block_size,
+    });
+
+    while (try generate_mipmaps.next()) |mipmap| {
+        self.levels.appendAssumeCapacity(mipmap);
+    }
+
+    // XXX: may need on first level too...could just condititionall do it when resizing that one and
+    // skip here?
+    // Preserve alpha coverage for alpha tested textures. Technically we could skip the first level
+    // if no resizing was done, but for simplicity's sake we don't.
+    if (self.alpha_test) |alpha_test| {
+        const alpha_zone = Zone.begin(.{ .name = "alpha test", .src = @src() });
+        defer alpha_zone.end();
+        for (self.levels.constSlice()) |level| {
+            level.rgbaF32PreserveAlphaCoverage(.{
+                .threshold = alpha_test.threshold,
+                .coverage = alpha_test.coverage,
+                .max_steps = alpha_test.max_steps,
+            });
+        }
+    }
+}
+
+pub fn rgbaF32Encode(
+    self: *@This(),
+    gpa: std.mem.Allocator,
+    max_threads: ?u16,
+    options: Image.EncodeOptions,
+) Image.EncodeError!void {
+    const zone = Zone.begin(.{ .src = @src() });
+    defer zone.end();
+    for (self.levels.slice()) |*slice| {
+        try slice.rgbaF32Encode(gpa, max_threads, options);
+    }
+}
+
+pub fn compressZlib(
+    self: *@This(),
+    allocator: std.mem.Allocator,
+    options: Image.CompressZlibOptions,
+) Image.CompressZlibError!void {
+    for (self.levels.slice()) |*level| {
+        try level.compressZlib(allocator, options);
+    }
+}
+
+// XXX: assert levels are right size, and encoded/compressed the same way
 pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
+
+    assert(self.levels.len > 0);
+    const encoding = self.levels.get(0).encoding;
+    const supercompression = self.levels.get(0).supercompression;
+    for (self.levels.constSlice()) |level| {
+        assert(level.encoding == encoding);
+        assert(level.supercompression == supercompression);
+    }
 
     // Serialization assumes little endian
     comptime assert(builtin.cpu.arch.endian() == .little);
 
     // Write the header
-    const samples = self.encoding.samples();
+    const samples = encoding.samples();
     const index = Ktx2.Header.Index.init(.{
-        .levels = @intCast(self.compressed_levels.len),
+        .levels = @intCast(self.levels.len),
         .samples = samples,
     });
     {
         const header_zone = Zone.begin(.{ .name = "header", .src = @src() });
         defer header_zone.end();
         try writer.writeStruct(Ktx2.Header{
-            .format = switch (self.encoding) {
+            .format = switch (encoding) {
                 .rgba_u8 => .r8g8b8a8_uint,
                 .rgba_srgb_u8 => .r8g8b8a8_srgb,
                 .rgba_f32 => .r32g32b32a32_sfloat,
                 .bc7 => .bc7_unorm_block,
                 .bc7_srgb => .bc7_srgb_block,
             },
-            .type_size = self.encoding.typeSize(),
+            .type_size = encoding.typeSize(),
             .pixel_width = self.width,
             .pixel_height = self.height,
             .pixel_depth = 0,
             .layer_count = 0,
             .face_count = 1,
-            .level_count = .fromInt(@intCast(self.compressed_levels.len)),
-            .supercompression_scheme = self.supercompression,
+            .level_count = .fromInt(@intCast(self.levels.len)),
+            .supercompression_scheme = supercompression,
             .index = index,
         });
     }
 
     // Write the level index
-    const level_alignment: u8 = if (self.supercompression != .none) 1 else switch (self.encoding) {
+    const level_alignment: u8 = if (supercompression != .none) 1 else switch (encoding) {
         .rgba_u8, .rgba_srgb_u8 => 4,
         .rgba_f32 => 16,
         .bc7, .bc7_srgb => 16,
@@ -255,21 +265,21 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
         var byte_offsets_reverse: std.BoundedArray(usize, Ktx2.max_levels) = .{};
         {
             var byte_offset: usize = index.dfd_byte_offset + index.dfd_byte_length;
-            for (0..self.compressed_levels.len) |i| {
+            for (0..self.levels.len) |i| {
                 byte_offset = std.mem.alignForward(usize, byte_offset, level_alignment);
-                const compressed_level = self.compressed_levels.get(self.compressed_levels.len - i - 1);
+                const compressed_level = self.levels.get(self.levels.len - i - 1);
                 byte_offsets_reverse.appendAssumeCapacity(byte_offset);
-                byte_offset += compressed_level.buf.len;
+                byte_offset += compressed_level.dataAsBytes().len;
             }
         }
 
         // Write the level index data, this is done from largest to smallest, only the actual data
         // is stored in reverse order.
-        for (0..self.compressed_levels.len) |i| {
+        for (0..self.levels.len) |i| {
             try writer.writeStruct(Ktx2.Level{
-                .byte_offset = byte_offsets_reverse.get(self.compressed_levels.len - i - 1),
-                .byte_length = self.compressed_levels.get(i).buf.len,
-                .uncompressed_byte_length = self.compressed_levels.get(i).uncompressed_len,
+                .byte_offset = byte_offsets_reverse.get(self.levels.len - i - 1),
+                .byte_length = self.levels.get(i).dataAsBytes().len,
+                .uncompressed_byte_length = self.levels.get(i).uncompressed_byte_length,
             });
         }
     }
@@ -282,23 +292,23 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
         try writer.writeInt(u32, index.dfd_byte_length, .little);
         try writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock{
             .descriptor_block_size = Ktx2.BasicDescriptorBlock.descriptorBlockSize(samples),
-            .model = switch (self.encoding) {
+            .model = switch (encoding) {
                 .rgba_u8, .rgba_srgb_u8, .rgba_f32 => .rgbsda,
                 .bc7, .bc7_srgb => .bc7,
             },
             .primaries = .bt709,
-            .transfer = switch (self.encoding.colorSpace()) {
+            .transfer = switch (encoding.colorSpace()) {
                 .linear, .hdr => .linear,
                 .srgb => .srgb,
             },
             .flags = .{
                 .alpha_premultiplied = self.alpha_is_transparency,
             },
-            .texel_block_dimension_0 = .fromInt(self.encoding.blockSize()),
-            .texel_block_dimension_1 = .fromInt(self.encoding.blockSize()),
+            .texel_block_dimension_0 = .fromInt(encoding.blockSize()),
+            .texel_block_dimension_1 = .fromInt(encoding.blockSize()),
             .texel_block_dimension_2 = .fromInt(1),
             .texel_block_dimension_3 = .fromInt(1),
-            .bytes_plane_0 = if (self.supercompression != .none) 0 else switch (self.encoding) {
+            .bytes_plane_0 = if (supercompression != .none) 0 else switch (encoding) {
                 .rgba_u8, .rgba_srgb_u8 => 4,
                 .rgba_f32 => 16,
                 .bc7, .bc7_srgb => 16,
@@ -311,7 +321,7 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
             .bytes_plane_6 = 0,
             .bytes_plane_7 = 0,
         })[0 .. @bitSizeOf(Ktx2.BasicDescriptorBlock) / 8]);
-        switch (self.encoding) {
+        switch (encoding) {
             .rgba_u8, .rgba_srgb_u8 => for (0..4) |i| {
                 const ChannelType = Ktx2.BasicDescriptorBlock.Sample.ChannelType(.rgbsda);
                 const channel_type: ChannelType = if (i == 3) .alpha else @enumFromInt(i);
@@ -319,7 +329,7 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
                     .bit_offset = .fromInt(8 * @as(u16, @intCast(i))),
                     .bit_length = .fromInt(8),
                     .channel_type = @enumFromInt(@intFromEnum(channel_type)),
-                    .linear = switch (self.encoding.colorSpace()) {
+                    .linear = switch (encoding.colorSpace()) {
                         .linear, .hdr => false,
                         .srgb => i == 3,
                     },
@@ -331,7 +341,7 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
                     .sample_position_2 = 0,
                     .sample_position_3 = 0,
                     .lower = 0,
-                    .upper = switch (self.encoding.colorSpace()) {
+                    .upper = switch (encoding.colorSpace()) {
                         .hdr => 1,
                         .srgb, .linear => 255,
                     },
@@ -385,16 +395,16 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
         defer level_data.end();
 
         var byte_offset: usize = index.dfd_byte_offset + index.dfd_byte_length;
-        for (0..self.compressed_levels.len) |i| {
+        for (0..self.levels.len) |i| {
             // Write padding
             const padded = std.mem.alignForward(usize, byte_offset, level_alignment);
             try writer.writeByteNTimes(0, padded - byte_offset);
             byte_offset = padded;
 
             // Write the level
-            const compressed_level = self.compressed_levels.get(self.compressed_levels.len - i - 1);
-            try writer.writeAll(compressed_level.buf);
-            byte_offset += compressed_level.buf.len;
+            const compressed_level = self.levels.get(self.levels.len - i - 1);
+            try writer.writeAll(compressed_level.dataAsBytes());
+            byte_offset += compressed_level.dataAsBytes().len;
         }
     }
 }

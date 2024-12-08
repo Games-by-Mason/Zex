@@ -14,16 +14,73 @@ const log = std.log;
 const c = @import("c.zig");
 const tracy = @import("tracy");
 const Zone = tracy.Zone;
+const Ktx2 = @import("Ktx2");
 
 const Image = @This();
 
 const max_file_len = 4294967296;
 
+const Data = union {
+    f32s: []f32,
+    u8s: []u8,
+};
+
 width: u32,
 height: u32,
-data: []f32,
+uncompressed_byte_length: u64,
+data: Data,
+// XXX: is this redundant with encoding, or is it wrt the source image? if the latter, and we decide
+// it's useful to keep (probably is), then document it or name it better! probably useful to prevent
+// errors and can be manually flipped if desired.
 hdr: bool,
+encoding: Encoding,
+supercompression: Ktx2.Header.SupercompressionScheme,
 allocator: Allocator,
+
+pub const Encoding = enum {
+    rgba_u8,
+    rgba_srgb_u8,
+    rgba_f32,
+    bc7,
+    bc7_srgb,
+
+    pub fn samples(self: @This()) u8 {
+        return switch (self) {
+            .rgba_u8, .rgba_srgb_u8, .rgba_f32 => 4,
+            .bc7, .bc7_srgb => 1,
+        };
+    }
+
+    pub fn blockSize(self: @This()) u8 {
+        return switch (self) {
+            .rgba_u8, .rgba_srgb_u8, .rgba_f32 => 1,
+            .bc7, .bc7_srgb => 4,
+        };
+    }
+
+    pub fn colorSpace(self: @This()) Image.ColorSpace {
+        return switch (self) {
+            .bc7, .rgba_u8 => .linear,
+            .bc7_srgb, .rgba_srgb_u8 => .srgb,
+            .rgba_f32 => .hdr,
+        };
+    }
+
+    pub fn typeSize(self: @This()) u8 {
+        return switch (self) {
+            .rgba_u8, .rgba_srgb_u8, .bc7, .bc7_srgb => 1,
+            .rgba_f32 => 4,
+        };
+    }
+};
+
+pub const EncodeOptions = union(Encoding) {
+    rgba_u8: void,
+    rgba_srgb_u8: void,
+    rgba_f32: void,
+    bc7: Bc7Options,
+    bc7_srgb: Bc7Options,
+};
 
 pub const InitError = error{
     /// STB failed to parse the image.
@@ -39,7 +96,7 @@ pub const ColorSpace = enum(c_uint) {
 };
 
 /// Read an image using `stb_image.h`.
-pub fn initFromReader(
+pub fn rgbaF32InitFromReader(
     gpa: std.mem.Allocator,
     reader: anytype,
     color_space: ColorSpace,
@@ -109,28 +166,62 @@ pub fn initFromReader(
     return .{
         .width = @intCast(width),
         .height = @intCast(height),
-        .data = data_ptr[0..data_len],
+        .uncompressed_byte_length = data_len * @sizeOf(f32),
+        .data = .{ .f32s = data_ptr[0..data_len] },
         .hdr = hdr,
+        .encoding = .rgba_f32,
+        .supercompression = .none,
         .allocator = stb_allocator,
     };
+}
+
+fn dataIsF32s(self: Image) bool {
+    return self.supercompression == .none and self.encoding == .rgba_f32;
+}
+
+// XXX: just always store as bytes but cast when needed?
+pub fn dataAsBytes(self: Image) []u8 {
+    if (self.dataIsF32s()) {
+        return std.mem.sliceAsBytes(self.data.f32s);
+    } else {
+        return self.data.u8s;
+    }
 }
 
 pub fn deinit(self: *Image) void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.allocator.free(self.data);
+    if (self.dataIsF32s()) {
+        self.allocator.free(self.data.f32s);
+    } else {
+        self.allocator.free(self.data.u8s);
+    }
     _ = self.toOwned();
 }
 
-pub fn premultiply(self: Image) void {
+pub fn assertIsUncompressedRgbaF32(self: Image) void {
+    if (self.encoding != .rgba_f32) {
+        std.debug.panic("expected {} found {}", .{ Encoding.rgba_f32, self.encoding });
+    }
+    if (self.supercompression != .none) {
+        std.debug.panic("expected {} found {}", .{
+            Ktx2.Header.SupercompressionScheme.none,
+            self.supercompression,
+        });
+    }
+}
+
+pub fn rgbaF32Premultiply(self: Image) void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
+    self.assertIsUncompressedRgbaF32();
     var px: usize = 0;
+    const f32s = self.data.f32s;
     while (px < @as(usize, self.width) * @as(usize, self.height) * 4) : (px += 4) {
-        const a = self.data[px + 3];
-        self.data[px + 0] = self.data[px + 0] * a;
-        self.data[px + 1] = self.data[px + 1] * a;
-        self.data[px + 2] = self.data[px + 2] * a;
+        const a = f32s[px + 3];
+        f32s[px + 0] = f32s[px + 0] * a;
+        f32s[px + 1] = f32s[px + 1] * a;
+        f32s[px + 2] = f32s[px + 2] * a;
     }
 }
 
@@ -182,10 +273,11 @@ pub const ResizeOptions = struct {
     filter_v: Filter,
 };
 
-pub fn resized(self: Image, options: ResizeOptions) ResizeError!Image {
+pub fn rgbaF32Resized(self: Image, options: ResizeOptions) ResizeError!Image {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
-    assert(options.width > 0 and options.height > 0);
+    self.assertIsUncompressedRgbaF32();
+    assert(options.width > 0 and options.height > 0); // XXX: ...
 
     const output_samples = @as(usize, options.width) * @as(usize, options.height) * 4;
     const data_ptr: [*]f32 = @ptrCast(@alignCast(c.malloc(
@@ -196,7 +288,7 @@ pub fn resized(self: Image, options: ResizeOptions) ResizeError!Image {
     var stbr_options: c.STBIR_RESIZE = undefined;
     c.stbir_resize_init(
         &stbr_options,
-        self.data.ptr,
+        self.data.f32s.ptr,
         @intCast(self.width),
         @intCast(self.height),
         0,
@@ -236,17 +328,21 @@ pub fn resized(self: Image, options: ResizeOptions) ResizeError!Image {
     return .{
         .width = options.width,
         .height = options.height,
-        .data = data,
+        .uncompressed_byte_length = data.len * @sizeOf(f32),
+        .data = .{ .f32s = data },
         .hdr = self.hdr,
+        .encoding = .rgba_f32,
+        .supercompression = .none,
         .allocator = stb_allocator,
     };
 }
 
-pub fn resize(self: *Image, options: ResizeOptions) ResizeError!void {
+pub fn rgbaF32Resize(self: *Image, options: ResizeOptions) ResizeError!void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
+    self.assertIsUncompressedRgbaF32();
     if (self.width != options.width or self.height != options.height) {
-        const result = try self.resized(options);
+        const result = try self.rgbaF32Resized(options);
         self.deinit();
         self.* = result;
     }
@@ -258,9 +354,10 @@ pub const SizeToFitOptions = struct {
     max_height: u32 = std.math.maxInt(u32),
 };
 
-pub fn sizeToFit(self: Image, options: SizeToFitOptions) struct { u32, u32 } {
+pub fn rgbaF32SizeToFit(self: Image, options: SizeToFitOptions) struct { u32, u32 } {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
+    self.assertIsUncompressedRgbaF32();
 
     const self_width_f: f64 = @floatFromInt(self.width);
     const self_height_f: f64 = @floatFromInt(self.height);
@@ -291,14 +388,15 @@ pub const ResizeToFitOptions = struct {
     filter_v: Filter,
 };
 
-pub fn resizeToFit(self: *Image, options: ResizeToFitOptions) ResizeError!void {
-    const width, const height = self.sizeToFit(.{
+pub fn rgbaF32ResizeToFit(self: *Image, options: ResizeToFitOptions) ResizeError!void {
+    self.assertIsUncompressedRgbaF32();
+    const width, const height = self.rgbaF32SizeToFit(.{
         .max_size = options.max_size,
         .max_width = options.max_width,
         .max_height = options.max_height,
     });
 
-    try self.resize(.{
+    try self.rgbaF32Resize(.{
         .width = width,
         .height = height,
         .address_mode_u = options.address_mode_u,
@@ -308,7 +406,8 @@ pub fn resizeToFit(self: *Image, options: ResizeToFitOptions) ResizeError!void {
     });
 }
 
-pub fn resizedToFit(self: Image, options: ResizeToFitOptions) ResizeError!Image {
+pub fn rgbaF32ResizedToFit(self: Image, options: ResizeToFitOptions) ResizeError!Image {
+    self.assertIsUncompressedRgbaF32();
     const width, const height = self.sizeToFit(.{
         .max_size = options.max_size,
         .max_width = options.max_width,
@@ -333,7 +432,8 @@ pub const GenerateMipMapsOptions = struct {
     filter_v: Filter,
 };
 
-pub fn generateMipmaps(self: Image, options: GenerateMipMapsOptions) GenerateMipmaps {
+pub fn rgbaF32GenerateMipmaps(self: Image, options: GenerateMipMapsOptions) GenerateMipmaps {
+    self.assertIsUncompressedRgbaF32();
     return .{
         .options = options,
         .image = self,
@@ -353,7 +453,7 @@ pub const GenerateMipmaps = struct {
         }
 
         // Halve the image size
-        self.image = try self.image.resized(.{
+        self.image = try self.image.rgbaF32Resized(.{
             .width = @max(1, self.image.width / 2),
             .height = @max(1, self.image.height / 2),
             .address_mode_u = self.options.address_mode_u,
@@ -365,17 +465,19 @@ pub const GenerateMipmaps = struct {
     }
 };
 
-pub fn alphaCoverage(self: Image, threshold: f32, scale: f32) f32 {
+pub fn rgbaF32AlphaCoverage(self: Image, threshold: f32, scale: f32) f32 {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
+    self.assertIsUncompressedRgbaF32();
 
     // Quantize the threshold to the output type
     const quantized_threshold = if (self.hdr) threshold else @round(threshold * 255.0) / 255.0;
 
     // Calculate the coverage
     var coverage: f32 = 0;
+    const f32s = self.data.f32s;
     for (0..@as(usize, self.width) * @as(usize, self.height)) |i| {
-        const alpha = self.data[i * 4 + 3];
+        const alpha = f32s[i * 4 + 3];
         if (alpha * scale > quantized_threshold) coverage += 1.0;
     }
     coverage /= @floatFromInt(@as(usize, self.width) * @as(usize, self.height));
@@ -388,9 +490,10 @@ pub const PreserveAlphaCoverageOptions = struct {
     threshold: f32,
 };
 
-pub fn preserveAlphaCoverage(self: Image, options: PreserveAlphaCoverageOptions) void {
+pub fn rgbaF32PreserveAlphaCoverage(self: Image, options: PreserveAlphaCoverageOptions) void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
+    self.assertIsUncompressedRgbaF32();
 
     // Binary search for the best scale parameter
     var best_scale: f32 = 1.0;
@@ -403,7 +506,7 @@ pub fn preserveAlphaCoverage(self: Image, options: PreserveAlphaCoverageOptions)
         defer search_zone.end();
         for (0..options.max_steps) |_| {
             const curr_scale = options.threshold / curr_threshold;
-            const coverage = self.alphaCoverage(options.threshold, curr_scale);
+            const coverage = self.rgbaF32AlphaCoverage(options.threshold, curr_scale);
             const dist_to_coverage = @abs(coverage - options.coverage);
             if (dist_to_coverage < best_dist) {
                 best_dist = dist_to_coverage;
@@ -426,8 +529,9 @@ pub fn preserveAlphaCoverage(self: Image, options: PreserveAlphaCoverageOptions)
     if (best_scale != 1.0) {
         const search_zone = Zone.begin(.{ .name = "scale", .src = @src() });
         defer search_zone.end();
+        const f32s = self.data.f32s;
         for (0..@as(usize, self.width) * @as(usize, self.height)) |i| {
-            const a = &self.data[i * 4 + 3];
+            const a = &f32s[i * 4 + 3];
             a.* = @min(a.* * best_scale, 1.0);
         }
     }
@@ -435,11 +539,396 @@ pub fn preserveAlphaCoverage(self: Image, options: PreserveAlphaCoverageOptions)
 
 pub fn toOwned(self: *Image) Image {
     const owned: Image = self.*;
+    // XXX: do we really need to clear this stuff? could just clear the data
     self.width = 0;
     self.height = 0;
-    self.data = &.{};
+    // XXX: weird to have to do this but helps with deinit...
+    self.data = if (self.dataIsF32s()) .{ .f32s = &.{} } else .{ .u8s = &.{} };
     self.allocator = moved_allocator;
     return owned;
+}
+
+pub const EncodeError = EncodeRgbaU8Error || EncodeBc7Error;
+
+// XXX: CURRENT: update this to encode the already stored image
+// XXX: do we really need the general function for this? alternatively, do we really need the specific ones
+// to be public? we only expose the general one on texture cause less boilerplate. if we get rid of
+// the other ones publically, then we can consider name order again.
+// XXX: make an encode function on texture that encodes all its levels
+pub fn rgbaF32Encode(
+    self: *@This(),
+    gpa: Allocator,
+    max_threads: ?u16,
+    options: EncodeOptions,
+) EncodeError!void {
+    const zone = Zone.begin(.{ .src = @src() });
+    defer zone.end();
+    switch (options) {
+        .rgba_u8 => try self.rgbaF32EncodeRgbaU8(gpa),
+        .rgba_srgb_u8 => try self.rgbaF32EncodeRgbaSrgbU8(gpa),
+        .rgba_f32 => {},
+        .bc7 => |bc7_options| try self.rgbaF32EncodeBc7(max_threads, bc7_options),
+        .bc7_srgb => |bc7_options| try self.rgbaF32EncodeBc7Srgb(max_threads, bc7_options),
+    }
+}
+
+pub const EncodeRgbaU8Error = error{OutOfMemory};
+
+pub fn rgbaF32EncodeRgbaU8(self: *@This(), gpa: Allocator) EncodeRgbaU8Error!void {
+    try self.rgbaF32EncodeRgbaU8Ex(gpa, false);
+}
+
+pub fn rgbaF32EncodeRgbaSrgbU8(self: *@This(), gpa: Allocator) EncodeRgbaU8Error!void {
+    try self.rgbaF32EncodeRgbaU8Ex(gpa, true);
+}
+
+fn rgbaF32EncodeRgbaU8Ex(self: *@This(), gpa: Allocator, srgb: bool) EncodeRgbaU8Error!void {
+    const zone = Zone.begin(.{ .src = @src() });
+    defer zone.end();
+    self.assertIsUncompressedRgbaF32();
+
+    const f32s = self.data.f32s;
+    const data = b: {
+        const alloc_zone = Zone.begin(.{ .name = "alloc", .src = @src() });
+        defer alloc_zone.end();
+        break :b try gpa.alloc(u8, f32s.len);
+    };
+
+    {
+        const encode_zone = Zone.begin(.{ .name = "encode", .src = @src() });
+        defer encode_zone.end();
+        for (0..f32s.len) |i| {
+            var ldr = f32s[i];
+            if (srgb and i % 4 != 3) {
+                ldr = std.math.pow(f32, ldr, 1.0 / 2.2);
+            }
+            ldr = std.math.clamp(ldr * 255.0 + 0.5, 0.0, 255.0);
+            data[i] = @intFromFloat(ldr);
+        }
+    }
+
+    self.allocator.free(self.data.f32s);
+    self.* = .{
+        .width = self.width,
+        .height = self.height,
+        .hdr = self.hdr,
+        .encoding = if (srgb) .rgba_srgb_u8 else .rgba_u8,
+        .uncompressed_byte_length = data.len,
+        .data = .{ .u8s = data },
+        .allocator = gpa,
+        .supercompression = .none,
+    };
+}
+
+pub const Bc7Options = struct {
+    uber_level: u8 = Bc7Enc.Params.max_uber_level,
+    reduce_entropy: bool = false,
+    max_partitions_to_scan: u16 = Bc7Enc.Params.max_partitions,
+    mode_6_only: bool = false,
+    rdo: ?struct {
+        lambda: f32 = 0.5,
+        lookback_window: ?u17 = null,
+        smooth_block_error_scale: ?f32 = 15.0,
+        quantize_mode_6_endpoints: bool = true,
+        weight_modes: bool = true,
+        weight_low_frequency_partitions: bool = true,
+        pbit1_weighting: bool = true,
+        max_smooth_block_std_dev: f32 = 18.0,
+        try_two_matches: bool = true,
+        ultrasmooth_block_handling: bool = true,
+    },
+};
+
+pub const EncodeBc7Error = error{ InvalidOption, EncoderFailed };
+
+pub fn rgbaF32EncodeBc7(
+    self: *@This(),
+    max_threads: ?u16,
+    options: Bc7Options,
+) EncodeBc7Error!void {
+    try self.encodeBc7Ex(max_threads, false, options);
+}
+
+pub fn rgbaF32EncodeBc7Srgb(
+    self: *@This(),
+    max_threads: ?u16,
+    options: Bc7Options,
+) EncodeBc7Error!void {
+    try self.encodeBc7Ex(max_threads, true, options);
+}
+
+fn encodeBc7Ex(
+    self: *@This(),
+    max_threads: ?u16,
+    srgb: bool,
+    options: Bc7Options,
+) EncodeBc7Error!void {
+    const zone = Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    if (self.encoding != .rgba_f32) @panic("can only encode from rgba-f32");
+    if (self.supercompression != .none) @panic("can only encode uncompressed data");
+
+    // Determine the bc7 params
+    var params: Bc7Enc.Params = .{};
+    {
+        const params_zone = Zone.begin(.{ .name = "params", .src = @src() });
+        defer params_zone.end();
+
+        if (options.uber_level > Bc7Enc.Params.max_uber_level) {
+            log.err("Invalid uber level.", .{});
+            return error.InvalidOption;
+        }
+        params.bc7_uber_level = options.uber_level;
+
+        params.reduce_entropy = options.reduce_entropy;
+
+        if (options.max_partitions_to_scan > Bc7Enc.Params.max_partitions) {
+            log.err("Invalid max partitions to scan.", .{});
+            return error.InvalidOption;
+        }
+        params.max_partitions_to_scan = options.max_partitions_to_scan;
+        // Ignored when using RDO. However, we use it in our bindings. The actual encoder
+        // just clears it so it doesn't matter that we set it regardless.
+        params.perceptual = srgb;
+        params.mode6_only = options.mode_6_only;
+
+        if (max_threads) |v| {
+            if (v == 0) {
+                log.err("Invalid max threads.", .{});
+                return error.InvalidOption;
+            }
+            params.rdo_max_threads = v;
+        } else {
+            params.rdo_max_threads = @intCast(std.math.clamp(
+                std.Thread.getCpuCount() catch 1,
+                1,
+                std.math.maxInt(u32),
+            ));
+        }
+        params.rdo_multithreading = params.rdo_max_threads > 1;
+
+        if (options.rdo) |rdo| {
+            if ((rdo.lambda < 0.0) or (rdo.lambda > 500.0)) {
+                log.err("Invalid RDO lambda.", .{});
+                return error.InvalidOption;
+            }
+            params.rdo_lambda = rdo.lambda;
+
+            if (rdo.lookback_window) |lookback_window| {
+                if (lookback_window < Bc7Enc.Params.min_lookback_window_size) {
+                    log.err("Invalid lookback window.", .{});
+                    return error.InvalidOption;
+                }
+                params.lookback_window_size = lookback_window;
+                params.custom_lookback_window_size = true;
+            }
+
+            if (rdo.smooth_block_error_scale) |v| {
+                if ((v < 1.0) or (v > 500.0)) {
+                    log.err("Invalid smooth block error scale.", .{});
+                    return error.InvalidOption;
+                }
+                params.rdo_smooth_block_error_scale = v;
+                params.custom_rdo_smooth_block_error_scale = true;
+            }
+
+            params.rdo_bc7_quant_mode6_endpoints = rdo.quantize_mode_6_endpoints;
+            params.rdo_bc7_weight_modes = rdo.weight_modes;
+            params.rdo_bc7_weight_low_frequency_partitions = rdo.weight_low_frequency_partitions;
+            params.rdo_bc7_pbit1_weighting = rdo.pbit1_weighting;
+
+            if ((rdo.max_smooth_block_std_dev) < 0.000125 or (rdo.max_smooth_block_std_dev > 256.0)) {
+                log.err("Invalid smooth block standard deviation.", .{});
+                return error.InvalidOption;
+            }
+            params.rdo_max_smooth_block_std_dev = rdo.max_smooth_block_std_dev;
+            params.rdo_try_2_matches = rdo.try_two_matches;
+            params.rdo_ultrasmooth_block_handling = rdo.ultrasmooth_block_handling;
+        }
+    }
+
+    // Encode the image
+    const bc7_encoder = b: {
+        const init_zone = Zone.begin(.{ .name = "init", .src = @src() });
+        defer init_zone.end();
+        break :b Bc7Enc.init() orelse return error.EncoderFailed;
+    };
+
+    {
+        const encode_zone = Zone.begin(.{ .name = "encode", .src = @src() });
+        defer encode_zone.end();
+        if (!bc7_encoder.encode(&params, self.width, self.height, self.data.f32s.ptr)) {
+            return error.EncoderFailed;
+        }
+    }
+
+    self.allocator.free(self.data.f32s);
+    const data = bc7_encoder.getBlocks();
+    self.* = .{
+        .width = self.width,
+        .height = self.height,
+        .uncompressed_byte_length = data.len,
+        .data = .{ .u8s = data },
+        .encoding = if (srgb) .bc7_srgb else .bc7,
+        .allocator = bc7EncAllocator(bc7_encoder),
+        .supercompression = .none,
+        .hdr = self.hdr,
+    };
+}
+
+pub const Bc7Enc = opaque {
+    pub const Params = extern struct {
+        pub const max_partitions = 64;
+        pub const max_uber_level = 4;
+        pub const max_level = 18;
+        pub const min_lookback_window_size = 8;
+
+        const Bc345ModeMask = enum(u32) {
+            const bc4_use_all_modes: @This() = .bc4_default_search_rad;
+
+            bc4_default_search_rad = 3,
+            bc4_use_mode8_flag = 1,
+            bc4_use_mode6_flag = 2,
+
+            _,
+        };
+
+        pub const Bc1ApproxMode = enum(c_uint) {
+            ideal = 0,
+            nvidia = 1,
+            amd = 2,
+            ideal_round_4 = 3,
+            _,
+        };
+
+        pub const DxgiFormat = enum(c_uint) {
+            bc7_unorm = 98,
+        };
+
+        bc7_uber_level: c_int = max_uber_level,
+        max_partitions_to_scan: c_int = max_partitions,
+        perceptual: bool = false,
+        bc45_channel0: u32 = 0,
+        bc45_channel1: u32 = 1,
+
+        bc1_mode: Bc1ApproxMode = .ideal,
+        use_bc1_3color_mode: bool = true,
+
+        use_bc1_3color_mode_for_black: bool = true,
+
+        bc1_quality_level: c_int = max_level,
+
+        dxgi_format: DxgiFormat = .bc7_unorm,
+
+        rdo_lambda: f32 = 0.0,
+        rdo_debug_output: bool = false,
+        rdo_smooth_block_error_scale: f32 = 15.0,
+        custom_rdo_smooth_block_error_scale: bool = false,
+        lookback_window_size: u32 = 128,
+        custom_lookback_window_size: bool = false,
+        rdo_bc7_quant_mode6_endpoints: bool = true,
+        rdo_bc7_weight_modes: bool = true,
+        rdo_bc7_weight_low_frequency_partitions: bool = true,
+        rdo_bc7_pbit1_weighting: bool = true,
+        rdo_max_smooth_block_std_dev: f32 = 18.0,
+        rdo_allow_relative_movement: bool = false,
+        rdo_try_2_matches: bool = true,
+        rdo_ultrasmooth_block_handling: bool = true,
+
+        use_hq_bc345: bool = true,
+        bc345_search_rad: c_int = 5,
+        bc345_mode_mask: Bc345ModeMask = Bc345ModeMask.bc4_use_all_modes,
+
+        mode6_only: bool = false,
+        rdo_multithreading: bool = true,
+
+        reduce_entropy: bool = false,
+
+        m_use_bc7e: bool = false,
+        status_output: bool = false,
+
+        rdo_max_threads: u32 = 128,
+    };
+
+    pub const init = bc7enc_init;
+    pub const deinit = bc7enc_deinit;
+    pub const encode = bc7enc_encode;
+    pub fn getBlocks(self: *@This()) []u8 {
+        const bytes = bc7enc_getTotalBlocksSizeInBytes(self);
+        return bc7enc_getBlocks(self)[0..bytes];
+    }
+
+    extern fn bc7enc_init() callconv(.C) ?*@This();
+    extern fn bc7enc_deinit(self: *@This()) callconv(.C) void;
+    extern fn bc7enc_encode(
+        self: *@This(),
+        params: *const Params,
+        width: u32,
+        height: u32,
+        pixels: [*]const f32,
+    ) callconv(.C) bool;
+    extern fn bc7enc_getBlocks(self: *@This()) callconv(.C) [*]u8;
+    extern fn bc7enc_getTotalBlocksSizeInBytes(self: *@This()) callconv(.C) u32;
+};
+
+pub const CompressZlibOptions = union(enum) {
+    level: std.compress.flate.deflate.Level,
+};
+
+// XXX: make helper that dispatches to given one? don't think that's needed, remove from encode too?
+pub const CompressZlibError = error{ OutOfMemory, UnfinishedBits };
+
+pub fn compressZlib(
+    self: *@This(),
+    gpa: Allocator,
+    options: CompressZlibOptions,
+) CompressZlibError!void {
+    const zone = Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    if (self.supercompression != .none) std.debug.panic("expected {} found {}", .{
+        Ktx2.Header.SupercompressionScheme.none,
+        self.supercompression,
+    });
+
+    const zlib_zone = Zone.begin(.{ .name = "zlib", .src = @src() });
+    defer zlib_zone.end();
+
+    var compressed = b: {
+        const alloc_zone = Zone.begin(.{ .name = "alloc", .src = @src() });
+        defer alloc_zone.end();
+        break :b try std.ArrayListUnmanaged(u8).initCapacity(gpa, self.dataAsBytes().len);
+    };
+    defer compressed.deinit(gpa);
+
+    const Compressor = std.compress.flate.deflate.Compressor(
+        .zlib,
+        @TypeOf(compressed).Writer,
+    );
+    var compressor = try Compressor.init(
+        compressed.writer(gpa),
+        .{ .level = options.level },
+    );
+    _ = try compressor.write(self.dataAsBytes());
+    try compressor.finish();
+
+    const original = self.*; // XXX: annoying needing to do this
+    self.deinit();
+    self.* = .{
+        .width = original.width,
+        .height = original.height,
+        .uncompressed_byte_length = original.uncompressed_byte_length,
+        .data = .{ .u8s = b: {
+            const to_owned_zone = Zone.begin(.{ .name = "toOwnedSlice", .src = @src() });
+            defer to_owned_zone.end();
+            break :b try compressed.toOwnedSlice(gpa);
+        } },
+        .hdr = original.hdr,
+        .encoding = original.encoding,
+        .supercompression = .zlib,
+        .allocator = gpa,
+    };
 }
 
 fn unsupportedAlloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
@@ -496,3 +985,22 @@ const moved_allocator: Allocator = .{
         .free = &movedFree,
     },
 };
+
+fn bc7EncFree(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+    _ = buf_align;
+    _ = ret_addr;
+    _ = buf;
+    const bc7_encoder: *Bc7Enc = @ptrCast(ctx);
+    bc7_encoder.deinit();
+}
+
+fn bc7EncAllocator(bc7_encoder: *Bc7Enc) Allocator {
+    return .{
+        .ptr = bc7_encoder,
+        .vtable = &.{
+            .alloc = &unsupportedAlloc,
+            .resize = &unsupportedResize,
+            .free = &bc7EncFree,
+        },
+    };
+}
