@@ -1003,10 +1003,30 @@ pub fn compressZlib(
     };
 }
 
-fn unsupportedAlloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
+fn remapNoop(
+    ctx: *anyopaque,
+    memory: []u8,
+    alignment: std.mem.Alignment,
+    new_len: usize,
+    ret_addr: usize,
+) ?[*]u8 {
+    _ = ctx;
+    _ = memory;
+    _ = alignment;
+    _ = new_len;
+    _ = ret_addr;
+    return null;
+}
+
+fn unsupportedAlloc(
+    ctx: *anyopaque,
+    len: usize,
+    alignment: std.mem.Alignment,
+    ret_addr: usize,
+) ?[*]u8 {
     _ = ctx;
     _ = len;
-    _ = ptr_align;
+    _ = alignment;
     _ = ret_addr;
     @panic("unsupported");
 }
@@ -1014,28 +1034,28 @@ fn unsupportedAlloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize)
 fn unsupportedResize(
     ctx: *anyopaque,
     buf: []u8,
-    buf_align: u8,
+    alignment: std.mem.Alignment,
     new_len: usize,
     ret_addr: usize,
 ) bool {
     _ = ctx;
     _ = buf;
-    _ = buf_align;
+    _ = alignment;
     _ = new_len;
     _ = ret_addr;
     @panic("unsupported");
 }
 
-fn stbFree(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+fn stbFree(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
     _ = ctx;
-    _ = buf_align;
+    _ = alignment;
     _ = ret_addr;
     c.stbi_image_free(buf.ptr);
 }
 
-fn movedFree(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+fn movedFree(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
     _ = ctx;
-    _ = buf_align;
+    _ = alignment;
     _ = ret_addr;
     _ = buf;
 }
@@ -1046,6 +1066,7 @@ const stb_allocator: Allocator = .{
         .alloc = &unsupportedAlloc,
         .resize = &unsupportedResize,
         .free = &stbFree,
+        .remap = &remapNoop,
     },
 };
 
@@ -1055,11 +1076,12 @@ const moved_allocator: Allocator = .{
         .alloc = &unsupportedAlloc,
         .resize = &unsupportedResize,
         .free = &movedFree,
+        .remap = &remapNoop,
     },
 };
 
-fn bc7EncFree(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
-    _ = buf_align;
+fn bc7EncFree(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+    _ = alignment;
     _ = ret_addr;
     _ = buf;
     const bc7_encoder: *Bc7Enc = @ptrCast(ctx);
@@ -1073,6 +1095,7 @@ fn bc7EncAllocator(bc7_encoder: *Bc7Enc) Allocator {
             .alloc = &unsupportedAlloc,
             .resize = &unsupportedResize,
             .free = &bc7EncFree,
+            .remap = &remapNoop,
         },
     };
 }
