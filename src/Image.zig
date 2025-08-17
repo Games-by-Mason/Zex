@@ -22,6 +22,7 @@ const Ktx2 = @import("Ktx2");
 const c = @cImport({
     @cInclude("stb_image.h");
     @cInclude("stb_image_resize2.h");
+    @cInclude("zlib.h");
 });
 
 const Image = @This();
@@ -946,7 +947,18 @@ pub const Bc7Enc = opaque {
 };
 
 pub const CompressZlibOptions = union(enum) {
-    level: std.compress.flate.Compress.Level,
+    /// Only levels matching what Zig's std could previously handle are supported so we have the
+    /// option to switch back to the std implementation when it's re-implemented.
+    pub const Level = enum(u4) {
+        @"4" = 4,
+        @"5" = 5,
+        @"6" = 6,
+        @"7" = 7,
+        @"8" = 8,
+        @"9" = 9,
+    };
+
+    level: Level,
 };
 
 // XXX: make helper that dispatches to given one? don't think that's needed, remove from encode too?
@@ -968,27 +980,35 @@ pub fn compressZlib(
     const zlib_zone = Zone.begin(.{ .name = "zlib", .src = @src() });
     defer zlib_zone.end();
 
+    var compressed_len = c.compressBound(self.buf.len);
+
     var compressed = b: {
         const alloc_zone = Zone.begin(.{ .name = "alloc", .src = @src() });
         defer alloc_zone.end();
-        // XXX: can we start renaming these to ArrayList?
-        break :b try std.ArrayListUnmanaged(u8).initCapacity(gpa, self.buf.len);
+        // XXX: can we start renaming these to ArrayList? infer type here?
+        break :b try std.ArrayList(u8).initCapacity(gpa, compressed_len);
     };
     defer compressed.deinit(gpa);
-    var compressed_writer: std.Io.Writer.Allocating = .fromArrayList(gpa, &compressed);
 
-    // XXX: ...
-    var compressor_buffer: [1024]u8 = undefined;
-    var compressor = std.compress.flate.Compress.init(
-        &compressed_writer.writer,
-        &compressor_buffer,
-        .{
-            .level = options.level,
-            .container = .zlib,
-        },
-    );
-    try compressor.writer.writeAll(self.buf);
-    try compressor.end();
+    switch (c.compress2(
+        compressed.items.ptr,
+        &compressed_len,
+        self.buf.ptr,
+        self.buf.len,
+        @intFromEnum(options.level),
+    )) {
+        c.Z_OK => {},
+        c.Z_STREAM_END => @panic("Z_STREAM_END"),
+        c.Z_NEED_DICT => @panic("Z_NEED_DICT"),
+        c.Z_ERRNO => @panic("Z_ERRNO"),
+        c.Z_STREAM_ERROR => @panic("Z_STREAM_ERROR"),
+        c.Z_DATA_ERROR => @panic("Z_DATA_ERROR"),
+        c.Z_MEM_ERROR => @panic("Z_MEM_ERROR"),
+        c.Z_BUF_ERROR => @panic("Z_BUF_ERROR"),
+        c.Z_VERSION_ERROR => @panic("Z_VERSION_ERROR"),
+        else => |n| std.debug.panic("unknown zlib error: {}", .{n}),
+    }
+    compressed.items.len = compressed_len;
 
     const original = self.*; // XXX: annoying needing to do this
     self.deinit();

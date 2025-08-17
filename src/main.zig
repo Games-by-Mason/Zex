@@ -35,24 +35,6 @@ pub const Filter = enum(c_uint) {
     }
 };
 
-const ZlibLevel = enum(u4) {
-    const StdLevel = std.compress.flate.Compress.Level;
-
-    fastest = @intFromEnum(StdLevel.fast),
-    smallest = @intFromEnum(StdLevel.best),
-
-    @"4" = @intFromEnum(StdLevel.level_4),
-    @"5" = @intFromEnum(StdLevel.level_5),
-    @"6" = @intFromEnum(StdLevel.level_6),
-    @"7" = @intFromEnum(StdLevel.level_7),
-    @"8" = @intFromEnum(StdLevel.level_8),
-    @"9" = @intFromEnum(StdLevel.level_9),
-
-    pub fn toStdLevel(self: @This()) StdLevel {
-        return @enumFromInt(@intFromEnum(self));
-    }
-};
-
 const command: Command = .{
     .name = "zex",
     .description = "Converts images to KTX2.",
@@ -62,7 +44,7 @@ const command: Command = .{
             .long = "input-alpha",
             .default = .{ .value = .straight },
         }),
-        NamedArg.init(?ZlibLevel, .{
+        NamedArg.init(?Image.CompressZlibOptions.Level, .{
             .description = "supercompress the data at the given level with zlib",
             .long = "zlib",
             .default = .{ .value = null },
@@ -381,7 +363,7 @@ pub fn main() !void {
     });
     try texture.rgbaF32Encode(allocator, args.named.@"max-threads", encoding_options);
     if (args.named.zlib) |compression_level| {
-        try texture.compressZlib(allocator, .{ .level = compression_level.toStdLevel() });
+        try texture.compressZlib(allocator, .{ .level = compression_level });
     }
     try texture.writeKtx2(&output_file_writer.interface);
 }

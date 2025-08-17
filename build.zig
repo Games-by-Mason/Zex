@@ -85,6 +85,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Build zlib
+    const zlib_dep = b.dependency("zlib", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Build Zex
     const zex = b.addModule("zex", .{
         .root_source_file = b.path("src/root.zig"),
@@ -94,6 +100,7 @@ pub fn build(b: *std.Build) void {
     zex.addImport("Ktx2", ktx2);
     zex.linkLibrary(bindings);
     zex.addImport("tracy", tracy.module("tracy"));
+    zex.linkLibrary(zlib_dep.artifact("z"));
 
     // Build the command line tool
     const zex_exe = b.addExecutable(.{
