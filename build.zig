@@ -9,6 +9,11 @@ pub fn build(b: *std.Build) void {
         "tracy",
         "Build with Tracy support.",
     ) orelse false;
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Skip tests that do not match the specified filters.",
+    ) orelse &.{};
 
     // Fetch dependencies
     const bc7enc = b.dependency("bc7enc_rdo", .{});
@@ -131,4 +136,14 @@ pub fn build(b: *std.Build) void {
     }
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    // Create the test command
+    const lib_unit_tests = b.addTest(.{
+        .root_module = zex,
+        .filters = test_filters,
+    });
+    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_lib_unit_tests.step);
 }
