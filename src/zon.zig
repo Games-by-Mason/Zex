@@ -324,7 +324,9 @@ pub fn fromZoirNode(
         .diag = diag,
     };
 
-    return parser.parseExpr(T, node);
+    var result: T = undefined;
+    try parser.parseExpr(T, &result, node);
+    return result;
 }
 
 /// Frees ZON values.
@@ -407,8 +409,8 @@ const Parser = struct {
 
     const ParseExprError = error{ ParseZon, OutOfMemory };
 
-    fn parseExpr(self: *@This(), T: type, node: Zoir.Node.Index) ParseExprError!T {
-        return self.parseExprInner(T, node) catch |err| switch (err) {
+    fn parseExpr(self: *@This(), T: type, result: *T, node: Zoir.Node.Index) ParseExprError!void {
+        self.parseExprInner(T, result, node) catch |err| switch (err) {
             error.WrongType => return self.failExpectedType(T, node),
             else => |e| return e,
         };
@@ -419,39 +421,43 @@ const Parser = struct {
     fn parseExprInner(
         self: *@This(),
         T: type,
+        result: *T,
         node: Zoir.Node.Index,
-    ) ParseExprInnerError!T {
+    ) ParseExprInnerError!void {
         if (T == Zoir.Node.Index) {
-            return node;
+            result.* = node;
+            return;
         }
 
         switch (@typeInfo(T)) {
             .optional => |optional| if (node.get(self.zoir) == .null) {
-                return null;
+                result.* = null;
             } else {
-                return try self.parseExprInner(optional.child, node);
+                var some: optional.child = undefined;
+                try self.parseExprInner(optional.child, &some, node);
+                result.* = some;
             },
-            .bool => return self.parseBool(node),
-            .int => return self.parseInt(T, node),
-            .float => return self.parseFloat(T, node),
-            .@"enum" => return self.parseEnumLiteral(T, node),
+            .bool => try self.parseBool(result, node),
+            .int => try self.parseInt(T, result, node),
+            .float => try self.parseFloat(T, result, node),
+            .@"enum" => try self.parseEnumLiteral(T, result, node),
             .pointer => |pointer| switch (pointer.size) {
                 .one => {
-                    const result = try self.gpa.create(pointer.child);
-                    errdefer self.gpa.destroy(result);
-                    result.* = try self.parseExprInner(pointer.child, node);
-                    return result;
+                    const mutable = try self.gpa.create(pointer.child);
+                    errdefer self.gpa.destroy(mutable);
+                    try self.parseExprInner(pointer.child, mutable, node);
+                    result.* = mutable;
                 },
-                .slice => return self.parseSlicePointer(T, node),
+                .slice => try self.parseSlicePointer(T, result, node),
                 else => comptime unreachable,
             },
-            .array => return self.parseArray(T, node),
+            .array => return self.parseArray(T, result, node),
             .@"struct" => |@"struct"| if (@"struct".is_tuple)
-                return self.parseTuple(T, node)
+                return self.parseTuple(T, result, node)
             else
-                return self.parseStruct(T, node),
-            .@"union" => return self.parseUnion(T, node),
-            .vector => return self.parseVector(T, node),
+                return self.parseStruct(T, result, node),
+            .@"union" => return self.parseUnion(T, result, node),
+            .vector => return self.parseVector(T, result, node),
 
             else => comptime unreachable,
         }
@@ -540,47 +546,47 @@ const Parser = struct {
         }
     }
 
-    fn parseBool(self: @This(), node: Zoir.Node.Index) !bool {
+    fn parseBool(self: @This(), result: *bool, node: Zoir.Node.Index) !void {
         switch (node.get(self.zoir)) {
-            .true => return true,
-            .false => return false,
+            .true => result.* = true,
+            .false => result.* = false,
             else => return error.WrongType,
         }
     }
 
-    fn parseInt(self: @This(), T: type, node: Zoir.Node.Index) !T {
-        switch (node.get(self.zoir)) {
-            .int_literal => |int| switch (int) {
-                .small => |val| return std.math.cast(T, val) orelse
-                    self.failCannotRepresent(T, node),
-                .big => |val| return val.toInt(T) catch
-                    self.failCannotRepresent(T, node),
-            },
-            .float_literal => |val| return intFromFloatExact(T, val) orelse
-                self.failCannotRepresent(T, node),
-
-            .char_literal => |val| return std.math.cast(T, val) orelse
-                self.failCannotRepresent(T, node),
-            else => return error.WrongType,
-        }
-    }
-
-    fn parseFloat(self: @This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseInt(self: @This(), T: type, result: *T, node: Zoir.Node.Index) !void {
         switch (node.get(self.zoir)) {
             .int_literal => |int| switch (int) {
-                .small => |val| return @floatFromInt(val),
-                .big => |val| return val.toFloat(T, .nearest_even)[0],
+                .small => |val| result.* = std.math.cast(T, val) orelse
+                    return self.failCannotRepresent(T, node),
+                .big => |val| result.* = val.toInt(T) catch
+                    return self.failCannotRepresent(T, node),
             },
-            .float_literal => |val| return @floatCast(val),
-            .pos_inf => return std.math.inf(T),
-            .neg_inf => return -std.math.inf(T),
-            .nan => return std.math.nan(T),
-            .char_literal => |val| return @floatFromInt(val),
+            .float_literal => |val| result.* = intFromFloatExact(T, val) orelse
+                return self.failCannotRepresent(T, node),
+
+            .char_literal => |val| result.* = std.math.cast(T, val) orelse
+                return self.failCannotRepresent(T, node),
             else => return error.WrongType,
         }
     }
 
-    fn parseEnumLiteral(self: @This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseFloat(self: @This(), T: type, result: *T, node: Zoir.Node.Index) !void {
+        switch (node.get(self.zoir)) {
+            .int_literal => |int| switch (int) {
+                .small => |val| result.* = @floatFromInt(val),
+                .big => |val| result.* = val.toFloat(T, .nearest_even)[0],
+            },
+            .float_literal => |val| result.* = @floatCast(val),
+            .pos_inf => result.* = std.math.inf(T),
+            .neg_inf => result.* = -std.math.inf(T),
+            .nan => result.* = std.math.nan(T),
+            .char_literal => |val| result.* = @floatFromInt(val),
+            else => return error.WrongType,
+        }
+    }
+
+    fn parseEnumLiteral(self: @This(), T: type, result: *T, node: Zoir.Node.Index) !void {
         switch (node.get(self.zoir)) {
             .enum_literal => |field_name| {
                 // Create a comptime string map for the enum fields
@@ -593,23 +599,33 @@ const Parser = struct {
 
                 // Get the tag if it exists
                 const field_name_str = field_name.get(self.zoir);
-                return enum_tags.get(field_name_str) orelse
-                    self.failUnexpected(T, "enum literal", node, null, field_name_str);
+                result.* = enum_tags.get(field_name_str) orelse
+                    return self.failUnexpected(T, "enum literal", node, null, field_name_str);
             },
             else => return error.WrongType,
         }
     }
 
-    fn parseSlicePointer(self: *@This(), T: type, node: Zoir.Node.Index) ParseExprInnerError!T {
+    fn parseSlicePointer(
+        self: *@This(),
+        T: type,
+        result: *T,
+        node: Zoir.Node.Index,
+    ) ParseExprInnerError!void {
         switch (node.get(self.zoir)) {
-            .string_literal => return self.parseString(T, node),
-            .array_literal => |nodes| return self.parseSlice(T, nodes),
-            .empty_literal => return self.parseSlice(T, .{ .start = node, .len = 0 }),
+            .string_literal => try self.parseString(T, result, node),
+            .array_literal => |nodes| try self.parseSlice(T, result, nodes),
+            .empty_literal => try self.parseSlice(T, result, .{ .start = node, .len = 0 }),
             else => return error.WrongType,
         }
     }
 
-    fn parseString(self: *@This(), T: type, node: Zoir.Node.Index) ParseExprInnerError!T {
+    fn parseString(
+        self: *@This(),
+        T: type,
+        result: *T,
+        node: Zoir.Node.Index,
+    ) ParseExprInnerError!void {
         const ast_node = node.getAstNode(self.zoir);
         const pointer = @typeInfo(T).pointer;
         var size_hint = ZonGen.strLitSizeHint(self.ast, ast_node);
@@ -618,13 +634,22 @@ const Parser = struct {
         var aw: std.Io.Writer.Allocating = .init(self.gpa);
         try aw.ensureUnusedCapacity(size_hint);
         defer aw.deinit();
-        const result = ZonGen.parseStrLit(self.ast, ast_node, &aw.writer) catch return error.OutOfMemory;
-        switch (result) {
+        const parse_str_lit_result = ZonGen.parseStrLit(
+            self.ast,
+            ast_node,
+            &aw.writer,
+        ) catch return error.OutOfMemory;
+        switch (parse_str_lit_result) {
             .success => {},
             .failure => |err| {
                 const token = self.ast.nodeMainToken(ast_node);
                 const raw_string = self.ast.tokenSlice(token);
-                return self.failTokenFmt(token, @intCast(err.offset()), "{f}", .{err.fmt(raw_string)});
+                return self.failTokenFmt(
+                    token,
+                    @intCast(err.offset()),
+                    "{f}",
+                    .{err.fmt(raw_string)},
+                );
             },
         }
 
@@ -638,13 +663,18 @@ const Parser = struct {
         }
 
         if (pointer.sentinel() != null) {
-            return aw.toOwnedSliceSentinel(0);
+            result.* = try aw.toOwnedSliceSentinel(0);
         } else {
-            return aw.toOwnedSlice();
+            result.* = try aw.toOwnedSlice();
         }
     }
 
-    fn parseSlice(self: *@This(), T: type, nodes: Zoir.Node.Index.Range) !T {
+    fn parseSlice(
+        self: *@This(),
+        T: type,
+        result: *T,
+        nodes: Zoir.Node.Index.Range,
+    ) !void {
         const pointer = @typeInfo(T).pointer;
 
         // Make sure we're working with a slice
@@ -654,28 +684,28 @@ const Parser = struct {
         }
 
         // Allocate the slice
-        const slice = try self.gpa.allocWithOptions(
+        const mutable = try self.gpa.allocWithOptions(
             pointer.child,
             nodes.len,
             .fromByteUnits(pointer.alignment),
             pointer.sentinel(),
         );
-        errdefer self.gpa.free(slice);
+        errdefer self.gpa.free(mutable);
 
         // Parse the elements and return the slice
-        for (slice, 0..) |*elem, i| {
+        for (mutable, 0..) |*elem, i| {
             errdefer if (self.options.free_on_error) {
-                for (slice[0..i]) |item| {
+                for (mutable[0..i]) |item| {
                     free(self.gpa, item);
                 }
             };
-            elem.* = try self.parseExpr(pointer.child, nodes.at(@intCast(i)));
+            try self.parseExpr(pointer.child, elem, nodes.at(@intCast(i)));
         }
 
-        return slice;
+        result.* = mutable;
     }
 
-    fn parseArray(self: *@This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseArray(self: *@This(), T: type, result: *T, node: Zoir.Node.Index) !void {
         const nodes: Zoir.Node.Index.Range = switch (node.get(self.zoir)) {
             .array_literal => |nodes| nodes,
             .empty_literal => .{ .start = node, .len = 0 },
@@ -700,8 +730,7 @@ const Parser = struct {
         }
 
         // Parse the elements and return the array
-        var result: T = undefined;
-        for (&result, 0..) |*elem, i| {
+        for (result, 0..) |*elem, i| {
             // If we fail to parse this field, free all fields before it
             errdefer if (self.options.free_on_error) {
                 for (result[0..i]) |item| {
@@ -709,12 +738,11 @@ const Parser = struct {
                 }
             };
 
-            elem.* = try self.parseExpr(array_info.child, nodes.at(@intCast(i)));
+            try self.parseExpr(array_info.child, elem, nodes.at(@intCast(i)));
         }
-        return result;
     }
 
-    fn parseStruct(self: *@This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseStruct(self: *@This(), T: type, result: *T, node: Zoir.Node.Index) !void {
         const repr = node.get(self.zoir);
         const fields: @FieldType(Zoir.Node, "struct_literal") = switch (repr) {
             .struct_literal => |nodes| nodes,
@@ -736,7 +764,6 @@ const Parser = struct {
         };
 
         // Parse the struct
-        var result: T = undefined;
         var field_found: [field_infos.len]bool = @splat(false);
 
         // If we fail partway through, free all already initialized fields
@@ -746,7 +773,7 @@ const Parser = struct {
                 switch (field_indices.get(name_runtime.get(self.zoir)) orelse continue) {
                     inline 0...(field_infos.len - 1) => |name_index| {
                         const name = field_infos[name_index].name;
-                        free(self.gpa, @field(result, name));
+                        free(self.gpa, @field(result.*, name));
                     },
                     else => unreachable, // Can't be out of bounds
                 }
@@ -773,8 +800,9 @@ const Parser = struct {
                 inline 0...(field_infos.len - 1) => |j| {
                     if (field_infos[j].is_comptime) unreachable;
 
-                    @field(result, field_infos[j].name) = try self.parseExpr(
+                    try self.parseExpr(
                         field_infos[j].type,
+                        &@field(result.*, field_infos[j].name),
                         fields.vals.at(@intCast(i)),
                     );
                 },
@@ -790,7 +818,7 @@ const Parser = struct {
                 const field_info = field_infos[i];
                 if (field_info.default_value_ptr) |default| {
                     const typed: *const field_info.type = @ptrCast(@alignCast(default));
-                    @field(result, field_info.name) = typed.*;
+                    @field(result.*, field_info.name) = typed.*;
                 } else {
                     return self.failNodeFmt(
                         node,
@@ -800,18 +828,15 @@ const Parser = struct {
                 }
             }
         }
-
-        return result;
     }
 
-    fn parseTuple(self: *@This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseTuple(self: *@This(), T: type, result: *T, node: Zoir.Node.Index) !void {
         const nodes: Zoir.Node.Index.Range = switch (node.get(self.zoir)) {
             .array_literal => |nodes| nodes,
             .empty_literal => .{ .start = node, .len = 0 },
             else => return error.WrongType,
         };
 
-        var result: T = undefined;
         const field_infos = @typeInfo(T).@"struct".fields;
 
         if (nodes.len > field_infos.len) {
@@ -827,7 +852,7 @@ const Parser = struct {
             if (i >= nodes.len) {
                 if (field_infos[i].default_value_ptr) |default| {
                     const typed: *const field_infos[i].type = @ptrCast(@alignCast(default));
-                    @field(result, field_infos[i].name) = typed.*;
+                    @field(result.*, field_infos[i].name) = typed.*;
                 } else {
                     return self.failNodeFmt(node, "missing tuple field with index {}", .{i});
                 }
@@ -843,15 +868,13 @@ const Parser = struct {
                 if (field_infos[i].is_comptime) {
                     return self.failComptimeField(node, i);
                 } else {
-                    result[i] = try self.parseExpr(field_infos[i].type, nodes.at(i));
+                    try self.parseExpr(field_infos[i].type, &result[i], nodes.at(i));
                 }
             }
         }
-
-        return result;
     }
 
-    fn parseUnion(self: *@This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseUnion(self: *@This(), T: type, result: *T, node: Zoir.Node.Index) !void {
         const @"union" = @typeInfo(T).@"union";
         const field_infos = @"union".fields;
 
@@ -890,7 +913,7 @@ const Parser = struct {
                             return self.failNode(node, "expected union");
 
                         // Instantiate the union
-                        return @unionInit(T, field_infos[i].name, {});
+                        result.* = @unionInit(T, field_infos[i].name, {});
                     },
                     else => unreachable, // Can't be out of bounds
                 }
@@ -912,8 +935,13 @@ const Parser = struct {
                         if (field_infos[i].type == void) {
                             return self.failNode(field_val, "expected type 'void'");
                         } else {
-                            const value = try self.parseExpr(field_infos[i].type, field_val);
-                            return @unionInit(T, field_infos[i].name, value);
+                            var value: field_infos[i].type = undefined;
+                            try self.parseExpr(
+                                field_infos[i].type,
+                                &value,
+                                field_val,
+                            );
+                            result.* = @unionInit(T, field_infos[i].name, value);
                         }
                     },
                     else => unreachable, // Can't be out of bounds
@@ -926,8 +954,9 @@ const Parser = struct {
     fn parseVector(
         self: *@This(),
         T: type,
+        result: *T,
         node: Zoir.Node.Index,
-    ) !T {
+    ) !void {
         const vector_info = @typeInfo(T).vector;
 
         const nodes: Zoir.Node.Index.Range = switch (node.get(self.zoir)) {
@@ -935,8 +964,6 @@ const Parser = struct {
             .empty_literal => .{ .start = node, .len = 0 },
             else => return error.WrongType,
         };
-
-        var result: T = undefined;
 
         if (nodes.len != vector_info.len) {
             return self.failNodeFmt(
@@ -948,10 +975,10 @@ const Parser = struct {
 
         for (0..vector_info.len) |i| {
             errdefer for (0..i) |j| free(self.gpa, result[j]);
-            result[i] = try self.parseExpr(vector_info.child, nodes.at(@intCast(i)));
+            var elem: vector_info.child = undefined;
+            try self.parseExpr(vector_info.child, &elem, nodes.at(@intCast(i)));
+            result[i] = elem;
         }
-
-        return result;
     }
 
     fn failTokenFmt(
