@@ -7,13 +7,34 @@ const Ktx2 = @import("Ktx2");
 const Image = @import("Image.zig");
 const Texture = @This();
 
-levels: std.BoundedArray(Image, Ktx2.max_levels) = .{},
+pub const capacity = Ktx2.max_levels;
+
+buf: [capacity]Image = undefined,
+len: u8 = 0,
+
+comptime {
+    assert(std.math.maxInt(@FieldType(@This(), "len")) >= capacity);
+}
 
 pub fn deinit(self: *@This()) void {
-    for (self.levels.slice()) |*compressed_level| {
+    for (self.levels()) |*compressed_level| {
         compressed_level.deinit();
     }
     self.* = undefined;
+}
+
+pub fn appendLevel(self: *@This(), level: Image) error{OutOfBounds}!void {
+    if (capacity - self.len == 0) return error.OutOfBounds;
+    self.buf[self.len] = level;
+    self.len += 1;
+}
+
+pub fn levels(self: *@This()) []Image {
+    return @constCast(self.levelsConst());
+}
+
+pub fn levelsConst(self: *const @This()) []const Image {
+    return self.buf[0..self.len];
 }
 
 pub const GenerateMipMapsOptions = struct {
@@ -38,8 +59,8 @@ pub fn rgbaF32GenerateMipmaps(self: *@This(), options: GenerateMipMapsOptions) I
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    if (self.levels.len != 1) @panic("generate mipmaps requires exactly one level");
-    const source = self.levels.get(0);
+    if (self.len != 1) @panic("generate mipmaps requires exactly one level");
+    const source = self.levels()[0];
     source.assertIsUncompressedRgbaF32();
 
     // XXX: do we really need this iterator to be built into image?
@@ -52,7 +73,7 @@ pub fn rgbaF32GenerateMipmaps(self: *@This(), options: GenerateMipMapsOptions) I
     });
 
     while (try generate_mipmaps.next()) |mipmap| {
-        self.levels.appendAssumeCapacity(mipmap);
+        self.appendLevel(mipmap) catch @panic("OOB");
     }
 }
 
@@ -64,7 +85,7 @@ pub fn rgbaF32Encode(
 ) Image.EncodeError!void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
-    for (self.levels.slice()) |*slice| {
+    for (self.levels()) |*slice| {
         try slice.rgbaF32Encode(gpa, max_threads, options);
     }
 }
@@ -74,25 +95,25 @@ pub fn compressZlib(
     allocator: std.mem.Allocator,
     options: Image.CompressZlibOptions,
 ) Image.CompressZlibError!void {
-    for (self.levels.slice()) |*level| {
+    for (self.levels()) |*level| {
         try level.compressZlib(allocator, options);
     }
 }
 
 // XXX: assert levels are right size, and encoded/compressed the same way, document
-pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
+pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    assert(self.levels.len > 0);
-    const first_level = self.levels.get(0);
+    assert(self.len > 0);
+    const first_level = self.levelsConst()[0];
     const encoding = first_level.encoding;
     const supercompression = first_level.supercompression;
     const premultiplied = first_level.alpha.premultiplied();
     {
         var level_width = first_level.width;
         var level_height = first_level.height;
-        for (self.levels.constSlice()) |level| {
+        for (self.levelsConst()) |level| {
             // XXX: be consistent with panics vs asserts, may want to use panics here so that we can do
             // release fast to elide expensive in loop checks but still check cheap interface guarantees
             assert(level.encoding == encoding);
@@ -114,7 +135,7 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
     // Write the header
     const samples = encoding.samples();
     const index = Ktx2.Header.Index.init(.{
-        .levels = @intCast(self.levels.len),
+        .levels = self.len,
         .samples = samples,
     });
     {
@@ -134,10 +155,10 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
             .pixel_depth = 0,
             .layer_count = 0,
             .face_count = 1,
-            .level_count = .fromInt(@intCast(self.levels.len)),
+            .level_count = .fromInt(self.len),
             .supercompression_scheme = supercompression,
             .index = index,
-        });
+        }, .little);
     }
 
     // Write the level index
@@ -150,27 +171,29 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
         const level_index_zone = Zone.begin(.{ .name = "level index", .src = @src() });
         defer level_index_zone.end();
 
+        // XXX: stop saying "unmanaged", don't need to anymore
         // Calculate the byte offsets, taking into account that KTX2 requires mipmaps be stored from
         // largest to smallest for streaming purposes
-        var byte_offsets_reverse: std.BoundedArray(usize, Ktx2.max_levels) = .{};
+        var byte_offsets_reverse_buf: [Ktx2.max_levels]usize = undefined;
+        var byte_offsets_reverse: std.ArrayList(usize) = .initBuffer(&byte_offsets_reverse_buf);
         {
             var byte_offset: usize = index.dfd_byte_offset + index.dfd_byte_length;
-            for (0..self.levels.len) |i| {
+            for (0..self.len) |i| {
                 byte_offset = std.mem.alignForward(usize, byte_offset, level_alignment);
-                const compressed_level = self.levels.get(self.levels.len - i - 1);
-                byte_offsets_reverse.appendAssumeCapacity(byte_offset);
+                const compressed_level = self.levelsConst()[self.len - i - 1];
+                byte_offsets_reverse.appendBounded(byte_offset) catch @panic("OOB");
                 byte_offset += compressed_level.buf.len;
             }
         }
 
         // Write the level index data, this is done from largest to smallest, only the actual data
         // is stored in reverse order.
-        for (0..self.levels.len) |i| {
+        for (self.levelsConst(), 0..) |level, i| {
             try writer.writeStruct(Ktx2.Level{
-                .byte_offset = byte_offsets_reverse.get(self.levels.len - i - 1),
-                .byte_length = self.levels.get(i).buf.len,
-                .uncompressed_byte_length = self.levels.get(i).uncompressed_byte_length,
-            });
+                .byte_offset = byte_offsets_reverse.items[self.len - i - 1],
+                .byte_length = level.buf.len,
+                .uncompressed_byte_length = level.uncompressed_byte_length,
+            }, .little);
         }
     }
 
@@ -285,14 +308,14 @@ pub fn writeKtx2(self: @This(), writer: anytype) @TypeOf(writer).Error!void {
         defer level_data.end();
 
         var byte_offset: usize = index.dfd_byte_offset + index.dfd_byte_length;
-        for (0..self.levels.len) |i| {
+        for (0..self.len) |i| {
             // Write padding
             const padded = std.mem.alignForward(usize, byte_offset, level_alignment);
-            try writer.writeByteNTimes(0, padded - byte_offset);
+            try writer.splatByteAll(0, padded - byte_offset);
             byte_offset = padded;
 
             // Write the level
-            const compressed_level = self.levels.get(self.levels.len - i - 1);
+            const compressed_level = self.levelsConst()[self.len - i - 1];
             try writer.writeAll(compressed_level.buf);
             byte_offset += compressed_level.buf.len;
         }

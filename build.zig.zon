@@ -2,7 +2,7 @@
     .name = .zex,
     .fingerprint = 0xe07352783aba7305,
     .version = "0.0.0",
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.0-dev.1564+2761cc8be",
     .dependencies = .{
         .bc7enc_rdo = .{
             // Mirror available: https://github.com/Games-by-Mason/bc7enc_rdo
@@ -10,16 +10,16 @@
             .hash = "N-V-__8AAJeObgIVtrk3FGcJHu_Ucg02P-6nB7xwDSZ2vaL-",
         },
         .structopt = .{
-            .url = "https://github.com/Games-by-Mason/structopt/archive/ece2d39c8d577b17757aa74fca6982340b0d11eb.tar.gz",
-            .hash = "structopt-0.0.0-OgtKAowoAQDe4FinGx-MizYv4mN15C4zEIlotz20qHl-",
+            .url = "git+https://github.com/Games-By-Mason/structopt#ca000425f5e1828221ca858dd97a3b407e48be9e",
+            .hash = "structopt-1.0.0-OgtKAiE4AQCpaGqYCWS5aKYlzoeZLQxTAQH8EQJvyS7P",
         },
         .stb = .{
             .url = "https://github.com/nothings/stb/archive/5c205738c191bcb0abc65c4febfa9bd25ff35234.tar.gz",
             .hash = "N-V-__8AAAokTgCCkRqtrvPINtODP3xgOG7h7kb-_7bFR4X3",
         },
         .tracy = .{
-            .url = "https://github.com/Games-by-Mason/tracy_zig/archive/2373f5ca8d8a4d7f0081a4f0289392a44b7ea65a.tar.gz",
-            .hash = "tracy-0.0.0-R7l8BeYzAQA53bab961U2RmlzLfhgonSfd_xnuhuSj0m",
+            .url = "git+https://github.com/Games-By-Mason/tracy_zig#1cb0471b169637ebfc0a4f5ce827a3502412e564",
+            .hash = "tracy-0.0.0-R7l8BVxEAQDC2E_f6SlQZy5_4BAI2klvP5equvriL47a",
         },
     },
     .paths = .{

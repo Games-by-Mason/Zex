@@ -26,14 +26,17 @@ pub fn build(b: *std.Build) void {
     });
 
     // Build bc7enc
-    const libbc7enc = b.addStaticLibrary(.{
+    const libbc7enc = b.addLibrary(.{
         .name = "bc7enc",
-        .target = target,
-        // Doesn't currently pass safety checks
-        .optimize = switch (optimize) {
-            .ReleaseSmall => .ReleaseSmall,
-            else => .ReleaseFast,
-        },
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            // Doesn't currently pass safety checks
+            .optimize = switch (optimize) {
+                .ReleaseSmall => .ReleaseSmall,
+                else => .ReleaseFast,
+            },
+        }),
     });
     libbc7enc.addIncludePath(bc7enc.path(""));
     libbc7enc.addCSourceFiles(.{
@@ -54,14 +57,17 @@ pub fn build(b: *std.Build) void {
     libbc7enc.installHeadersDirectory(bc7enc.path("."), "bc7enc", .{});
 
     // Build the C bindings
-    const bindings = b.addStaticLibrary(.{
+    const bindings = b.addLibrary(.{
         .name = "bindings",
-        .target = target,
-        // Doesn't currently pass safety checks
-        .optimize = switch (optimize) {
-            .ReleaseSmall => .ReleaseSmall,
-            else => .ReleaseFast,
-        },
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            // Doesn't currently pass safety checks
+            .optimize = switch (optimize) {
+                .ReleaseSmall => .ReleaseSmall,
+                else => .ReleaseFast,
+            },
+        }),
     });
     bindings.addIncludePath(stb.path(""));
     bindings.addCSourceFiles(.{
@@ -92,9 +98,11 @@ pub fn build(b: *std.Build) void {
     // Build the command line tool
     const zex_exe = b.addExecutable(.{
         .name = "zex",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     zex_exe.root_module.addImport("zex", zex);
     zex_exe.root_module.addImport("structopt", structopt.module("structopt"));

@@ -15,10 +15,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log;
-const c = @import("c.zig");
 const tracy = @import("tracy");
 const Zone = tracy.Zone;
 const Ktx2 = @import("Ktx2");
+
+const c = @cImport({
+    @cInclude("stb_image.h");
+    @cInclude("stb_image_resize2.h");
+});
 
 const Image = @This();
 
@@ -130,22 +134,20 @@ pub const InitFromReaderOptions = struct {
     alpha: @This().Alpha,
 };
 
-pub fn InitFromReaderError(Reader: type) type {
-    return error{
-        StbImageFailure,
-        WrongColorSpace,
-        StreamTooLong,
-        OutOfMemory,
-    } || Reader.Error;
-}
+pub const InitFromReaderError = error{
+    StbImageFailure,
+    WrongColorSpace,
+    StreamTooLong,
+    OutOfMemory,
+} || std.Io.Reader.Error;
 
 /// Read an image using `stb_image.h`. Allocation done by STB.
 pub fn rgbaF32InitFromReader(
     gpa: std.mem.Allocator,
     max_file_len: usize,
-    reader: anytype,
+    reader: *std.Io.Reader,
     options: InitFromReaderOptions,
-) InitFromReaderError(@TypeOf(reader))!Image {
+) InitFromReaderError!Image {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
 
@@ -155,7 +157,7 @@ pub fn rgbaF32InitFromReader(
     const input_bytes = b: {
         const read_zone = Zone.begin(.{ .name = "read", .src = @src() });
         defer read_zone.end();
-        break :b try reader.readAllAlloc(gpa, max_file_len);
+        break :b try reader.allocRemaining(gpa, .limited(max_file_len));
     };
     defer gpa.free(input_bytes);
 
@@ -930,25 +932,25 @@ pub const Bc7Enc = opaque {
         return bc7enc_getBlocks(self)[0..bytes];
     }
 
-    extern fn bc7enc_init() callconv(.C) ?*@This();
-    extern fn bc7enc_deinit(self: *@This()) callconv(.C) void;
+    extern fn bc7enc_init() callconv(.c) ?*@This();
+    extern fn bc7enc_deinit(self: *@This()) callconv(.c) void;
     extern fn bc7enc_encode(
         self: *@This(),
         params: *const Params,
         width: u32,
         height: u32,
         pixels: [*]const f32,
-    ) callconv(.C) bool;
-    extern fn bc7enc_getBlocks(self: *@This()) callconv(.C) [*]u8;
-    extern fn bc7enc_getTotalBlocksSizeInBytes(self: *@This()) callconv(.C) u32;
+    ) callconv(.c) bool;
+    extern fn bc7enc_getBlocks(self: *@This()) callconv(.c) [*]u8;
+    extern fn bc7enc_getTotalBlocksSizeInBytes(self: *@This()) callconv(.c) u32;
 };
 
 pub const CompressZlibOptions = union(enum) {
-    level: std.compress.flate.deflate.Level,
+    level: std.compress.flate.Compress.Level,
 };
 
 // XXX: make helper that dispatches to given one? don't think that's needed, remove from encode too?
-pub const CompressZlibError = error{ OutOfMemory, UnfinishedBits };
+pub const CompressZlibError = Allocator.Error || std.Io.Writer.Error;
 
 pub fn compressZlib(
     self: *@This(),
@@ -969,20 +971,24 @@ pub fn compressZlib(
     var compressed = b: {
         const alloc_zone = Zone.begin(.{ .name = "alloc", .src = @src() });
         defer alloc_zone.end();
+        // XXX: can we start renaming these to ArrayList?
         break :b try std.ArrayListUnmanaged(u8).initCapacity(gpa, self.buf.len);
     };
     defer compressed.deinit(gpa);
+    var compressed_writer: std.Io.Writer.Allocating = .fromArrayList(gpa, &compressed);
 
-    const Compressor = std.compress.flate.deflate.Compressor(
-        .zlib,
-        @TypeOf(compressed).Writer,
+    // XXX: ...
+    var compressor_buffer: [1024]u8 = undefined;
+    var compressor = std.compress.flate.Compress.init(
+        &compressed_writer.writer,
+        &compressor_buffer,
+        .{
+            .level = options.level,
+            .container = .zlib,
+        },
     );
-    var compressor = try Compressor.init(
-        compressed.writer(gpa),
-        .{ .level = options.level },
-    );
-    _ = try compressor.write(self.buf);
-    try compressor.finish();
+    try compressor.writer.writeAll(self.buf);
+    try compressor.end();
 
     const original = self.*; // XXX: annoying needing to do this
     self.deinit();

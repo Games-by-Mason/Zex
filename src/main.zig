@@ -36,7 +36,7 @@ pub const Filter = enum(c_uint) {
 };
 
 const ZlibLevel = enum(u4) {
-    const StdLevel = std.compress.flate.deflate.Level;
+    const StdLevel = std.compress.flate.Compress.Level;
 
     fastest = @intFromEnum(StdLevel.fast),
     smallest = @intFromEnum(StdLevel.best),
@@ -264,6 +264,10 @@ pub fn main() !void {
     };
     defer input_file.close();
 
+    var reader_buf: [1024]u8 = undefined;
+    var input_file_reader = input_file.readerStreaming(&reader_buf);
+
+    // XXX: make sure we flush writers!
     var output_file = cwd.createFile(args.positional.OUTPUT, .{}) catch |err| {
         log.err("{s}: {s}", .{ args.positional.OUTPUT, @errorName(err) });
         std.process.exit(1);
@@ -272,6 +276,11 @@ pub fn main() !void {
         output_file.sync() catch |err| @panic(@errorName(err));
         output_file.close();
     }
+
+    // XXX: share buf or no? size?
+    var writer_buf: [1024]u8 = undefined;
+    // XXX: share buf or no? size?
+    var output_file_writer = output_file.writerStreaming(&writer_buf);
 
     const encoding_options: Image.EncodeOptions = switch (encoding) {
         .bc7 => |eo| b: {
@@ -311,10 +320,12 @@ pub fn main() !void {
     var texture: zex.Texture = .{};
     defer texture.deinit();
 
-    texture.levels.appendAssumeCapacity(try Image.rgbaF32InitFromReader(
+    // XXX: size?
+    // XXX: make sure we flush writers!
+    texture.appendLevel(try Image.rgbaF32InitFromReader(
         allocator,
         max_file_len,
-        input_file.reader(),
+        &input_file_reader.interface,
         .{
             // XXX: a little weird that this arg is here, alos other should be named/have default...
             .color_space = encoding_tag.colorSpace(),
@@ -323,12 +334,12 @@ pub fn main() !void {
                 .threshold = threshold,
             } } else .opacity,
         },
-    ));
+    )) catch @panic("OOB");
     // XXX: maybe we DO want to set filters/address mode on the texture once up front to make less verbose?
     // note that we resize the first level via a getter so would need a wrapper for that for that to be doable
     // with the params
     // Resize the image if requested
-    try texture.levels.slice()[0].rgbaF32ResizeToFit(.{
+    try texture.levels()[0].rgbaF32ResizeToFit(.{
         .max_size = args.named.@"max-size" orelse std.math.maxInt(u32),
         .max_width = args.named.@"max-width" orelse std.math.maxInt(u32),
         .max_height = args.named.@"max-height" orelse std.math.maxInt(u32),
@@ -372,5 +383,5 @@ pub fn main() !void {
     if (args.named.zlib) |compression_level| {
         try texture.compressZlib(allocator, .{ .level = compression_level.toStdLevel() });
     }
-    try texture.writeKtx2(output_file.writer());
+    try texture.writeKtx2(&output_file_writer.interface);
 }
