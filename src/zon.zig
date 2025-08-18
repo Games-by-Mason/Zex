@@ -1,5 +1,12 @@
 //! This is a fork of the standard library's ZON parser that adds the ability to update existing
 //! objects. If it works well, I'll make a PR upstreaming this idea.
+//!
+//! WIP:
+//! - Consider adding the option to recursively dup default values for easier freeing
+//!     - Either way, add the appropriate explanation to the docs and recommend arena style alloc
+//! - I made the defaults method an alternate variant so I wouldn't have to update all the tests for
+//!   now. Long term I should decide whether to do this or add an extra arg to the existing methods.
+//!   If we keep it separate, then consider making the arg non optional.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -248,6 +255,10 @@ pub const Diagnostics = struct {
 ///
 /// When the parser returns `error.ParseZon`, it will also store a human readable explanation in
 /// `diag` if non null. If diag is not null, it must be initialized to `.{}`.
+///
+/// If `defaults` is non-null, all struct fields become optional and any missing fields are then
+/// filled in with the data from `defaults`. Whenever a pointer, tuple, array, or untagged union is
+/// provided by ZON, its default value is replaced entirely without further propagation of defaults.
 pub fn fromSlice(
     /// The type to deserialize into. May not be or contain any of the following types:
     /// * Any comptime-only type, except in a comptime field
@@ -267,6 +278,24 @@ pub fn fromSlice(
     diag: ?*Diagnostics,
     options: Options,
 ) error{ OutOfMemory, ParseZon }!T {
+    return fromSliceDefaults(T, gpa, source, diag, null, options);
+}
+
+/// Similar to `fromSlice`, but allows passing in runtime known default values.
+///
+/// If `defaults` is non-null, all struct fields become optional and any missing fields are then
+/// filled in with the data from `defaults`.
+///
+/// Whenever a pointer, tuple, or untagged union is provided by ZON, its default value is replaced
+/// entirely without further propagation of defaults.
+pub fn fromSliceDefaults(
+    T: type,
+    gpa: Allocator,
+    source: [:0]const u8,
+    diag: ?*Diagnostics,
+    defaults: ?*const T,
+    options: Options,
+) error{ OutOfMemory, ParseZon }!T {
     if (diag) |s| s.assertEmpty();
 
     var ast = try std.zig.Ast.parse(gpa, source, .zon);
@@ -279,19 +308,20 @@ pub fn fromSlice(
     defer if (diag == null) zoir.deinit(gpa);
 
     if (diag) |s| s.* = .{};
-    return fromZoir(T, gpa, ast, zoir, diag, options);
+    return fromZoir(T, gpa, ast, zoir, diag, defaults, options);
 }
 
-/// Like `fromSlice`, but operates on `Zoir` instead of ZON source.
+/// Like `fromSlice`/`fromSliceDefaults`, but operates on `Zoir` instead of ZON source.
 pub fn fromZoir(
     T: type,
     gpa: Allocator,
     ast: Ast,
     zoir: Zoir,
     diag: ?*Diagnostics,
+    defaults: ?*const T,
     options: Options,
 ) error{ OutOfMemory, ParseZon }!T {
-    return fromZoirNode(T, gpa, ast, zoir, .root, diag, options);
+    return fromZoirNode(T, gpa, ast, zoir, .root, diag, defaults, options);
 }
 
 /// Like `fromZoir`, but the parse starts on `node` instead of root.
@@ -302,6 +332,7 @@ pub fn fromZoirNode(
     zoir: Zoir,
     node: Zoir.Node.Index,
     diag: ?*Diagnostics,
+    defaults: ?*const T,
     options: Options,
 ) error{ OutOfMemory, ParseZon }!T {
     comptime assert(canParseType(T));
@@ -324,7 +355,7 @@ pub fn fromZoirNode(
         .diag = diag,
     };
 
-    return parser.parseExpr(T, node);
+    return parser.parseExpr(T, node, defaults);
 }
 
 /// Frees ZON values.
@@ -407,8 +438,13 @@ const Parser = struct {
 
     const ParseExprError = error{ ParseZon, OutOfMemory };
 
-    fn parseExpr(self: *@This(), T: type, node: Zoir.Node.Index) ParseExprError!T {
-        return self.parseExprInner(T, node) catch |err| switch (err) {
+    fn parseExpr(
+        self: *@This(),
+        T: type,
+        node: Zoir.Node.Index,
+        maybe_defaults: ?*const T,
+    ) ParseExprError!T {
+        return self.parseExprInner(T, node, maybe_defaults) catch |err| switch (err) {
             error.WrongType => return self.failExpectedType(T, node),
             else => |e| return e,
         };
@@ -420,6 +456,7 @@ const Parser = struct {
         self: *@This(),
         T: type,
         node: Zoir.Node.Index,
+        maybe_defaults: ?*const T,
     ) ParseExprInnerError!T {
         if (T == Zoir.Node.Index) {
             return node;
@@ -429,7 +466,15 @@ const Parser = struct {
             .optional => |optional| if (node.get(self.zoir) == .null) {
                 return null;
             } else {
-                return try self.parseExprInner(optional.child, node);
+                const default_child = b: {
+                    const defaults = maybe_defaults orelse break :b null;
+                    break :b if (defaults.*) |*c| c else break :b null;
+                };
+                return try self.parseExprInner(
+                    optional.child,
+                    node,
+                    default_child,
+                );
             },
             .bool => return self.parseBool(node),
             .int => return self.parseInt(T, node),
@@ -439,18 +484,18 @@ const Parser = struct {
                 .one => {
                     const result = try self.gpa.create(pointer.child);
                     errdefer self.gpa.destroy(result);
-                    result.* = try self.parseExprInner(pointer.child, node);
+                    result.* = try self.parseExprInner(pointer.child, node, null);
                     return result;
                 },
                 .slice => return self.parseSlicePointer(T, node),
                 else => comptime unreachable,
             },
-            .array => return self.parseArray(T, node),
+            .array => return self.parseArray(T, node, maybe_defaults),
             .@"struct" => |@"struct"| if (@"struct".is_tuple)
                 return self.parseTuple(T, node)
             else
-                return self.parseStruct(T, node),
-            .@"union" => return self.parseUnion(T, node),
+                return self.parseStruct(T, node, maybe_defaults),
+            .@"union" => return self.parseUnion(T, node, maybe_defaults),
             .vector => return self.parseVector(T, node),
 
             else => comptime unreachable,
@@ -669,13 +714,13 @@ const Parser = struct {
                     free(self.gpa, item);
                 }
             };
-            elem.* = try self.parseExpr(pointer.child, nodes.at(@intCast(i)));
+            elem.* = try self.parseExpr(pointer.child, nodes.at(@intCast(i)), null);
         }
 
         return slice;
     }
 
-    fn parseArray(self: *@This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseArray(self: *@This(), T: type, node: Zoir.Node.Index, maybe_defaults: ?*const T) !T {
         const nodes: Zoir.Node.Index.Range = switch (node.get(self.zoir)) {
             .array_literal => |nodes| nodes,
             .empty_literal => .{ .start = node, .len = 0 },
@@ -709,12 +754,16 @@ const Parser = struct {
                 }
             };
 
-            elem.* = try self.parseExpr(array_info.child, nodes.at(@intCast(i)));
+            elem.* = try self.parseExpr(
+                array_info.child,
+                nodes.at(@intCast(i)),
+                if (maybe_defaults) |defaults| &defaults[i] else null,
+            );
         }
         return result;
     }
 
-    fn parseStruct(self: *@This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseStruct(self: *@This(), T: type, node: Zoir.Node.Index, maybe_defaults: ?*const T) !T {
         const repr = node.get(self.zoir);
         const fields: @FieldType(Zoir.Node, "struct_literal") = switch (repr) {
             .struct_literal => |nodes| nodes,
@@ -776,6 +825,7 @@ const Parser = struct {
                     @field(result, field_infos[j].name) = try self.parseExpr(
                         field_infos[j].type,
                         fields.vals.at(@intCast(i)),
+                        if (maybe_defaults) |defaults| &@field(defaults, field_infos[j].name) else null,
                     );
                 },
                 else => unreachable, // Can't be out of bounds
@@ -788,7 +838,9 @@ const Parser = struct {
         inline for (field_found, 0..) |found, i| {
             if (!found) {
                 const field_info = field_infos[i];
-                if (field_info.default_value_ptr) |default| {
+                if (maybe_defaults) |defaults| {
+                    @field(result, field_info.name) = @field(defaults, field_info.name);
+                } else if (field_info.default_value_ptr) |default| {
                     const typed: *const field_info.type = @ptrCast(@alignCast(default));
                     @field(result, field_info.name) = typed.*;
                 } else {
@@ -843,7 +895,7 @@ const Parser = struct {
                 if (field_infos[i].is_comptime) {
                     return self.failComptimeField(node, i);
                 } else {
-                    result[i] = try self.parseExpr(field_infos[i].type, nodes.at(i));
+                    result[i] = try self.parseExpr(field_infos[i].type, nodes.at(i), null);
                 }
             }
         }
@@ -851,7 +903,7 @@ const Parser = struct {
         return result;
     }
 
-    fn parseUnion(self: *@This(), T: type, node: Zoir.Node.Index) !T {
+    fn parseUnion(self: *@This(), T: type, node: Zoir.Node.Index, maybe_defaults: ?*const T) !T {
         const @"union" = @typeInfo(T).@"union";
         const field_infos = @"union".fields;
 
@@ -912,7 +964,27 @@ const Parser = struct {
                         if (field_infos[i].type == void) {
                             return self.failNode(field_val, "expected type 'void'");
                         } else {
-                            const value = try self.parseExpr(field_infos[i].type, field_val);
+                            // Get the default value for this union, if any
+                            const value_defaults: ?*const @FieldType(T, field_infos[i].name) = b: {
+                                // If the union isn't tagged it either gets replaced entirely or not
+                                // at all, we can't actually get the data out since we don't know
+                                // the tag
+                                if (@typeInfo(T).@"union".tag_type == null) break :b null;
+
+                                // Check if the default is for this tag
+                                const defaults = maybe_defaults orelse break :b null;
+                                const default_tag = std.meta.activeTag(defaults.*);
+                                const actual_tag = @field(std.meta.Tag(T), field_infos[i].name);
+                                if (actual_tag != default_tag) break :b null;
+
+                                // Break with the default
+                                break :b &@field(defaults, field_infos[i].name);
+                            };
+                            const value = try self.parseExpr(
+                                field_infos[i].type,
+                                field_val,
+                                value_defaults,
+                            );
                             return @unionInit(T, field_infos[i].name, value);
                         }
                     },
@@ -948,7 +1020,7 @@ const Parser = struct {
 
         for (0..vector_info.len) |i| {
             errdefer for (0..i) |j| free(self.gpa, result[j]);
-            result[i] = try self.parseExpr(vector_info.child, nodes.at(@intCast(i)));
+            result[i] = try self.parseExpr(vector_info.child, nodes.at(@intCast(i)), null);
         }
 
         return result;
@@ -1042,6 +1114,9 @@ const Parser = struct {
         name: []const u8,
     ) error{ OutOfMemory, ParseZon } {
         @branchHint(.cold);
+        // Early out without any allocation if diagnostic is null
+        if (self.diag == null) return error.ParseZon;
+
         const gpa = self.gpa;
         const token = if (field) |f| b: {
             var buf: [2]Ast.Node.Index = undefined;
@@ -3458,5 +3533,135 @@ test "std.zon stop on node" {
         defer diag.deinit(gpa);
         const result = try fromSlice(Zoir.Node.Index, gpa, "1.23", &diag, .{});
         try std.testing.expectEqual(Zoir.Node{ .float_literal = 1.23 }, result.get(diag.zoir));
+    }
+}
+
+test "std.zon defaults" {
+    const gpa = std.testing.allocator;
+
+    const Vec2 = struct { x: f32, y: f32 };
+    const Ivec2 = struct { x: i32, y: i32 };
+    const Test = struct {
+        a: f32,
+        b: struct {
+            a: union(enum) {
+                a: Vec2,
+                b: Ivec2,
+            },
+        },
+        c: *const struct { x: f32 = 0.1, y: f32 = 0.2 },
+        d: []const u8,
+        e: [3]u8,
+        f: struct { u8, u8, u8 },
+        g: ?Vec2,
+        h: ?Vec2,
+        i: @Vector(2, f32),
+    };
+
+    const defaults: Test = .{
+        .a = 0.5,
+        .b = .{
+            .a = .{ .a = .{ .x = 0.1, .y = 0.2 } },
+        },
+        .c = &.{ .x = 0.5, .y = 0.6 },
+        .d = "abc",
+        .e = .{ 1, 2, 3 },
+        .f = .{ 1, 2, 3 },
+        .g = null,
+        .h = .{ .x = 0.5, .y = 0.6 },
+        .i = .{ 0.1, 0.2 },
+    };
+
+    // Test accepting all the defaults
+    {
+        const result = try fromSliceDefaults(
+            Test,
+            gpa,
+            ".{}",
+            null,
+            &defaults,
+            .{},
+        );
+        try std.testing.expectEqualDeep(defaults, result);
+    }
+
+    // Test accepting only some of the defaults
+    {
+        const expected: Test = .{
+            .a = 0.7,
+            .b = .{ .a = .{ .a = .{ .x = 0.2, .y = 0.2 } } },
+            .c = &.{ .x = 0.0, .y = 0.2 },
+            .d = "abc",
+            .e = .{ 1, 2, 3 },
+            .f = .{ 1, 2, 3 },
+            .g = null,
+            .h = .{ .x = 0.9, .y = 0.6 },
+            .i = .{ 0.1, 0.2 },
+        };
+        const result = try fromSliceDefaults(
+            Test,
+            gpa,
+            \\.{
+            \\    .a = 0.7,
+            \\    .b = .{ .a = .{ .a = .{ .x = 0.2 } } },
+            \\    .c = .{ .x = 0.0 },
+            \\    .h = .{ .x = 0.9 },
+            \\}
+        ,
+            null,
+            &defaults,
+            .{},
+        );
+        defer gpa.destroy(result.c); // Real usage would likely arena allocate all of this
+        try std.testing.expectEqualDeep(expected, result);
+    }
+
+    // Test that defaults aren't freed in the free-on-error sequences
+    try std.testing.expectError(error.ParseZon, fromSliceDefaults(
+        Test,
+        gpa,
+        ".{ .c = .{}, .missing = .missing }",
+        null,
+        &defaults,
+        .{},
+    ));
+
+    // Test untagged unions
+    {
+        const Foo = struct {
+            a: union {
+                b: struct { x: u32 = 0, y: u32 = 1 },
+                c: f32,
+            },
+        };
+        const untagged_defaults: Foo = .{ .a = .{ .b = .{ .x = 123, .y = 456 } } };
+
+        // Test accepting the default untagged union value
+        {
+            const result = try fromSliceDefaults(
+                Foo,
+                gpa,
+                ".{}",
+                null,
+                &untagged_defaults,
+                .{},
+            );
+            try std.testing.expectEqual(123, result.a.b.x);
+            try std.testing.expectEqual(456, result.a.b.y);
+        }
+
+        // Test that if we replace part of it, the whole thing is replaced
+        {
+            const result = try fromSliceDefaults(
+                Foo,
+                gpa,
+                ".{ .a = .{ .b = .{ .x = 10 } } }",
+                null,
+                &untagged_defaults,
+                .{},
+            );
+            try std.testing.expectEqual(10, result.a.b.x);
+            try std.testing.expectEqual(1, result.a.b.y);
+        }
     }
 }
