@@ -62,9 +62,4 @@ I recommend [Tacent View](https://github.com/bluescan/tacentview) for inspecting
 
 ## Zex is a work in progress
 
-Planned features for 1.0 can be found [here](https://github.com/Games-by-Mason/Zex/milestone/1).
-
-# WIP
-* Current: cleaning up Image.zig, adding docs, then gonna do other files
-	* Maybe store filter and address mode on image so you can set it on init then get it automatically? kinda weird if you don't end up using it
-	* Same issue if stored on texture
+See the issues tracker for features that are tentatively planned but currently missing.
