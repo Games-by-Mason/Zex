@@ -119,13 +119,13 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
             assert(level.encoding == encoding);
             assert(level.supercompression == supercompression);
             assert(level.alpha.premultiplied() == premultiplied);
-            assert(level.width == level_width);
-            assert(level.height == level_height);
             // XXX: check against block size?
             assert(level.width > 0 and level.height > 0);
+            assert(level.width == level_width);
+            assert(level.height == level_height);
 
-            level_width /= 2;
-            level_height /= 2;
+            level_width = @max(1, level_width / 2);
+            level_height = @max(1, level_height / 2);
         }
     }
 

@@ -58,6 +58,7 @@ pub const Alpha = union(enum) {
         /// The ratio of pixels expected to pass the alpha test. See `rgbaF32PreserveAlphaCoverage`.
         target_coverage: f32,
     },
+    // XXX: we actually want to support non premul alpha for techniques like C2A
     /// The alpha channel is used for something other than transparency.
     ///
     /// It is not recommended to use this to avoid the premultiply step: you will get incorrect
@@ -145,7 +146,6 @@ pub const InitFromReaderError = error{
 /// Read an image using `stb_image.h`. Allocation done by STB.
 pub fn rgbaF32InitFromReader(
     gpa: std.mem.Allocator,
-    max_file_len: usize,
     reader: *std.Io.Reader,
     options: InitFromReaderOptions,
 ) InitFromReaderError!Image {
@@ -158,7 +158,7 @@ pub fn rgbaF32InitFromReader(
     const input_bytes = b: {
         const read_zone = Zone.begin(.{ .name = "read", .src = @src() });
         defer read_zone.end();
-        break :b try reader.allocRemaining(gpa, .limited(max_file_len));
+        break :b try reader.allocRemaining(gpa, .unlimited);
     };
     defer gpa.free(input_bytes);
 
