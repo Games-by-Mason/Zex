@@ -109,7 +109,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
     const first_level = self.levelsConst()[0];
     const encoding = first_level.encoding;
     const supercompression = first_level.supercompression;
-    const premultiplied = first_level.alpha.premultiplied();
+    const premultiplied = first_level.premultiplied;
     {
         var level_width = first_level.width;
         var level_height = first_level.height;
@@ -118,7 +118,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
             // release fast to elide expensive in loop checks but still check cheap interface guarantees
             assert(level.encoding == encoding);
             assert(level.supercompression == supercompression);
-            assert(level.alpha.premultiplied() == premultiplied);
+            assert(level.premultiplied == premultiplied);
             // XXX: check against block size?
             assert(level.width > 0 and level.height > 0);
             assert(level.width == level_width);

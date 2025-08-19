@@ -28,6 +28,7 @@ pub const Options = struct {
     } = .{},
     zlib: ?Image.CompressZlibOptions = .{ .level = .@"9" },
     generate_mipmaps: bool = true,
+    premultiply: bool = true,
 };
 
 /// High level helper that reads from input and writes to output, processing the image as described
@@ -57,6 +58,7 @@ pub fn process(
                 .{ .alpha_test = .{ .threshold = pac.alpha_test } }
             else
                 .opacity,
+            .premultiply = options.premultiply,
         },
     )) catch @panic("OOB");
 

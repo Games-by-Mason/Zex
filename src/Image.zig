@@ -42,7 +42,9 @@ hdr: bool,
 encoding: Encoding,
 /// The current supercompression scheme.
 supercompression: Ktx2.Header.SupercompressionScheme,
-/// The alpha channel mode.
+/// True if the alpha channel is premultiplied by the color channels.
+premultiplied: bool,
+/// The meaning of the alpha channel.
 alpha: Alpha,
 /// The allocator used to freeing buf on deinit.
 allocator: Allocator,
@@ -58,21 +60,8 @@ pub const Alpha = union(enum) {
         /// The ratio of pixels expected to pass the alpha test. See `rgbaF32PreserveAlphaCoverage`.
         target_coverage: f32,
     },
-    // XXX: we actually want to support non premul alpha for techniques like C2A
     /// The alpha channel is used for something other than transparency.
-    ///
-    /// It is not recommended to use this to avoid the premultiply step: you will get incorrect
-    /// filtering, both in Zex, and on your GPU. If premultiplied alpha looks wrong in your
-    /// renderer, check your blend mode.
     other: void,
-
-    /// Returns true for alpha modes where Zex will premultiply your alpha for you, false otherwise.
-    pub fn premultiplied(self: @This()) bool {
-        return switch (self) {
-            .alpha_test, .opacity => true,
-            .other => false,
-        };
-    }
 };
 
 pub const Encoding = enum(u32) {
@@ -139,6 +128,7 @@ pub const InitFromReaderOptions = struct {
     };
     color_space: ColorSpace,
     alpha: @This().Alpha,
+    premultiply: bool = true,
 };
 
 pub const InitFromReaderError = error{
@@ -223,12 +213,13 @@ pub fn rgbaF32InitFromReader(
             } },
             .other => .other,
         },
+        .premultiplied = options.premultiply,
         .supercompression = .none,
         .allocator = stb_allocator,
     };
 
     // Premultiply the alpha if requested
-    if (result.alpha.premultiplied()) {
+    if (options.premultiply) {
         const premultiply_zone = Zone.begin(.{ .name = "premultiply", .src = @src() });
         defer premultiply_zone.end();
         var px: usize = 0;
@@ -241,8 +232,9 @@ pub fn rgbaF32InitFromReader(
         }
     }
 
-    // XXX: do this lazily since it may not end up being used?
-    // Calculate coverage so that we can preserve it on resize
+    // Calculate coverage so that we can preserve it on resize. We could do this lazily since it may
+    // not be used, but it's not that expensive and typically wanted for alpha tests so caching it
+    // up front is a bit simpler.
     switch (result.alpha) {
         .alpha_test => |*at| at.target_coverage = result.rgbaF32AlphaCoverage(at.threshold, 1.0),
         else => {},
@@ -364,8 +356,14 @@ pub fn rgbaF32Resized(self: Image, options: ResizeOptions) ResizeError!Image {
         @intCast(options.width),
         @intCast(options.height),
         0,
-        // We always premultiply alpha channels ourselves if they represent transparency
-        c.STBIR_RGBA_PM,
+        if (self.premultiplied or self.alpha == .other) b: {
+            // We're either already premultiplied, or the alpha channel doesn't represent opacity
+            // and therefore doesn't need to be premultiplied.
+            break :b c.STBIR_RGBA_PM;
+        } else b: {
+            // We need to multiply by alpha for correct weighting, then unpremultiply after.
+            break :b c.STBIR_RGBA;
+        },
         c.STBIR_TYPE_FLOAT,
     );
 
@@ -403,6 +401,7 @@ pub fn rgbaF32Resized(self: Image, options: ResizeOptions) ResizeError!Image {
         .supercompression = .none,
         .allocator = stb_allocator,
         .alpha = self.alpha,
+        .premultiplied = self.premultiplied,
     };
 
     self.rgbaF32PreserveAlphaCoverage(options.preserve_alpha_coverage_max_steps);
@@ -691,6 +690,7 @@ fn rgbaF32EncodeRgbaU8Ex(self: *@This(), gpa: Allocator, srgb: bool) EncodeRgbaU
         .hdr = self.hdr,
         .encoding = if (srgb) .r8g8b8a8_srgb else .r8g8b8a8_unorm,
         .alpha = self.alpha,
+        .premultiplied = self.premultiplied,
         .uncompressed_byte_length = buf.len,
         .buf = buf,
         .allocator = gpa,
@@ -850,6 +850,7 @@ fn encodeBc7Ex(
         .buf = buf,
         .encoding = if (srgb) .bc7_srgb_block else .bc7_unorm_block,
         .alpha = self.alpha,
+        .premultiplied = self.premultiplied,
         .allocator = bc7EncAllocator(bc7_encoder),
         .supercompression = .none,
         .hdr = self.hdr,
@@ -1028,6 +1029,7 @@ pub fn compressZlib(
         .hdr = original.hdr,
         .encoding = original.encoding,
         .alpha = original.alpha,
+        .premultiplied = original.premultiplied,
         .supercompression = .zlib,
         .allocator = gpa,
     };
