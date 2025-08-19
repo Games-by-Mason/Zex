@@ -52,8 +52,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer input_file.close();
-
-    var input_buf: [1024]u8 = undefined;
+    var input_buf: [128]u8 = undefined;
     var input = input_file.readerStreaming(&input_buf);
 
     var config_file = cwd.openFile(args.named.config, .{}) catch |err| {
@@ -62,8 +61,7 @@ pub fn main() !void {
     };
     defer config_file.close();
 
-    // XXX: buffer?
-    var config_buf: [1024]u8 = undefined;
+    var config_buf: [128]u8 = undefined;
     var config_reader = config_file.readerStreaming(&config_buf);
     const config_zon = b: {
         var config_zon: std.ArrayList(u8) = .{};
@@ -93,7 +91,6 @@ pub fn main() !void {
         },
     };
 
-    // XXX: make sure we flush writers!
     var output_file = cwd.createFile(args.named.output, .{}) catch |err| {
         log.err("{s}: {s}", .{ args.named.output, @errorName(err) });
         std.process.exit(1);
@@ -103,13 +100,9 @@ pub fn main() !void {
         output_file.close();
     }
 
-    // XXX: share buf or no? size?
-    var output_buf: [1024]u8 = undefined;
+    var output_buf: [128]u8 = undefined;
     var output = output_file.writerStreaming(&output_buf);
 
-    // XXX: pass in options from zon (read from file/write default file if missing with all options
-    // specified)
-    // XXX: add deps file output to make it possible to actually use this as is from the build system?
     try zex.process(allocator, &input.interface, &output.interface, config);
 }
 

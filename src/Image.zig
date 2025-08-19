@@ -75,43 +75,48 @@ pub const Alpha = union(enum) {
     }
 };
 
-pub const Encoding = enum {
-    rgba_u8,
-    rgba_srgb_u8,
-    rgba_f32,
-    bc7,
-    bc7_srgb,
+pub const Encoding = enum(u32) {
+    r8g8b8a8_unorm = @intFromEnum(Ktx2.Header.VkFormat.r8g8b8a8_unorm),
+    r8g8b8a8_srgb = @intFromEnum(Ktx2.Header.VkFormat.r8g8b8a8_srgb),
+    r32g32b32_sfloat = @intFromEnum(Ktx2.Header.VkFormat.r32g32b32_sfloat),
+    bc7_unorm_block = @intFromEnum(Ktx2.Header.VkFormat.bc7_unorm_block),
+    bc7_srgb_block = @intFromEnum(Ktx2.Header.VkFormat.bc7_srgb_block),
+
+    /// Returns the encoding as a Vulkan format.
+    pub fn vkFormat(self: @This()) Ktx2.Header.VkFormat {
+        return @enumFromInt(@intFromEnum(self));
+    }
 
     /// Returns the number of samples per pixel.
     pub fn samples(self: @This()) u8 {
         return switch (self) {
-            .rgba_u8, .rgba_srgb_u8, .rgba_f32 => 4,
-            .bc7, .bc7_srgb => 1,
+            .r8g8b8a8_unorm, .r8g8b8a8_srgb, .r32g32b32_sfloat => 4,
+            .bc7_unorm_block, .bc7_srgb_block => 1,
         };
     }
 
     /// Returns the size of a block in pixels.
     pub fn blockSize(self: @This()) u8 {
         return switch (self) {
-            .rgba_u8, .rgba_srgb_u8, .rgba_f32 => 1,
-            .bc7, .bc7_srgb => 4,
+            .r8g8b8a8_unorm, .r8g8b8a8_srgb, .r32g32b32_sfloat => 1,
+            .bc7_unorm_block, .bc7_srgb_block => 4,
         };
     }
 
     /// Returns the color space.
     pub fn colorSpace(self: @This()) Image.ColorSpace {
         return switch (self) {
-            .bc7, .rgba_u8 => .linear,
-            .bc7_srgb, .rgba_srgb_u8 => .srgb,
-            .rgba_f32 => .hdr,
+            .bc7_unorm_block, .r8g8b8a8_unorm => .linear,
+            .bc7_srgb_block, .r8g8b8a8_srgb => .srgb,
+            .r32g32b32_sfloat => .hdr,
         };
     }
 
     /// Returns the element size.
     pub fn typeSize(self: @This()) u8 {
         return switch (self) {
-            .rgba_u8, .rgba_srgb_u8, .bc7, .bc7_srgb => 1,
-            .rgba_f32 => 4,
+            .r8g8b8a8_unorm, .r8g8b8a8_srgb, .bc7_unorm_block, .bc7_srgb_block => 1,
+            .r32g32b32_sfloat => 4,
         };
     }
 };
@@ -209,7 +214,7 @@ pub fn rgbaF32InitFromReader(
         .uncompressed_byte_length = buf.len,
         .buf = buf,
         .hdr = hdr,
-        .encoding = .rgba_f32,
+        .encoding = .r32g32b32_sfloat,
         .alpha = switch (options.alpha) {
             .opacity => .opacity,
             .alpha_test => |at| .{ .alpha_test = .{
@@ -258,7 +263,7 @@ pub fn deinit(self: *Image) void {
 }
 
 pub fn isUncompressedRgbaF32(self: Image) bool {
-    return self.encoding == .rgba_f32 and self.supercompression == .none;
+    return self.encoding == .r32g32b32_sfloat and self.supercompression == .none;
 }
 
 pub fn assertIsUncompressedRgbaF32(self: Image) void {
@@ -339,7 +344,7 @@ pub fn rgbaF32Resized(self: Image, options: ResizeOptions) ResizeError!Image {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
     self.assertIsUncompressedRgbaF32();
-    assert(options.width > 0 and options.height > 0); // XXX: ...
+    assert(options.width > 0 and options.height > 0);
 
     const output_samples_len = @as(usize, options.width) * @as(usize, options.height) * 4;
     const output_samples_ptr: [*]f32 = @ptrCast(@alignCast(c.malloc(
@@ -394,7 +399,7 @@ pub fn rgbaF32Resized(self: Image, options: ResizeOptions) ResizeError!Image {
         .uncompressed_byte_length = buf.len,
         .buf = buf,
         .hdr = self.hdr,
-        .encoding = .rgba_f32,
+        .encoding = .r32g32b32_sfloat,
         .supercompression = .none,
         .allocator = stb_allocator,
         .alpha = self.alpha,
@@ -613,11 +618,11 @@ pub fn toOwned(self: *Image) Image {
 }
 
 pub const EncodeOptions = union(Encoding) {
-    rgba_u8: void,
-    rgba_srgb_u8: void,
-    rgba_f32: void,
-    bc7: Bc7Options,
-    bc7_srgb: Bc7Options,
+    r8g8b8a8_unorm: void,
+    r8g8b8a8_srgb: void,
+    r32g32b32_sfloat: void,
+    bc7_unorm_block: Bc7Options,
+    bc7_srgb_block: Bc7Options,
 };
 
 pub const EncodeError = EncodeRgbaU8Error || EncodeBc7Error;
@@ -636,11 +641,11 @@ pub fn rgbaF32Encode(
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
     switch (options) {
-        .rgba_u8 => try self.rgbaF32EncodeRgbaU8(gpa),
-        .rgba_srgb_u8 => try self.rgbaF32EncodeRgbaSrgbU8(gpa),
-        .rgba_f32 => {},
-        .bc7 => |bc7_options| try self.rgbaF32EncodeBc7(max_threads, bc7_options),
-        .bc7_srgb => |bc7_options| try self.rgbaF32EncodeBc7Srgb(max_threads, bc7_options),
+        .r8g8b8a8_unorm => try self.rgbaF32EncodeRgbaU8(gpa),
+        .r8g8b8a8_srgb => try self.rgbaF32EncodeRgbaSrgbU8(gpa),
+        .r32g32b32_sfloat => {},
+        .bc7_unorm_block => |bc7_options| try self.rgbaF32EncodeBc7(max_threads, bc7_options),
+        .bc7_srgb_block => |bc7_options| try self.rgbaF32EncodeBc7Srgb(max_threads, bc7_options),
     }
 }
 
@@ -684,7 +689,7 @@ fn rgbaF32EncodeRgbaU8Ex(self: *@This(), gpa: Allocator, srgb: bool) EncodeRgbaU
         .width = self.width,
         .height = self.height,
         .hdr = self.hdr,
-        .encoding = if (srgb) .rgba_srgb_u8 else .rgba_u8,
+        .encoding = if (srgb) .r8g8b8a8_srgb else .r8g8b8a8_unorm,
         .alpha = self.alpha,
         .uncompressed_byte_length = buf.len,
         .buf = buf,
@@ -739,10 +744,10 @@ fn encodeBc7Ex(
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    if (self.encoding != .rgba_f32) @panic("can only encode from rgba-f32");
+    if (self.encoding != .r32g32b32_sfloat) @panic("can only encode from rgba-f32");
     if (self.supercompression != .none) @panic("can only encode uncompressed data");
 
-    // Determine the bc7 params
+    // Determine the bc7_unorm_block params
     var params: Bc7Enc.Params = .{};
     {
         const params_zone = Zone.begin(.{ .name = "params", .src = @src() });
@@ -843,7 +848,7 @@ fn encodeBc7Ex(
         .height = self.height,
         .uncompressed_byte_length = buf.len,
         .buf = buf,
-        .encoding = if (srgb) .bc7_srgb else .bc7,
+        .encoding = if (srgb) .bc7_srgb_block else .bc7_unorm_block,
         .alpha = self.alpha,
         .allocator = bc7EncAllocator(bc7_encoder),
         .supercompression = .none,
@@ -985,7 +990,6 @@ pub fn compressZlib(
     var compressed = b: {
         const alloc_zone = Zone.begin(.{ .name = "alloc", .src = @src() });
         defer alloc_zone.end();
-        // XXX: can we start renaming these to ArrayList? infer type here?
         break :b try std.ArrayList(u8).initCapacity(gpa, compressed_len);
     };
     defer compressed.deinit(gpa);

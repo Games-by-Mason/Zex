@@ -8,7 +8,7 @@ pub const Image = @import("Image.zig");
 pub const Texture = @import("Texture.zig");
 
 pub const Options = struct {
-    encoding: Image.EncodeOptions = .rgba_u8,
+    encoding: Image.EncodeOptions = .r8g8b8a8_srgb,
     preserve_alpha_coverage: ?struct {
         alpha_test: f32 = 0.5,
         max_steps: u8 = 10,
@@ -30,8 +30,6 @@ pub const Options = struct {
     generate_mipmaps: bool = true,
 };
 
-// XXX: do we really need all these separate errors? we just want a way to log and return some failure right?
-// i mean it's fine
 /// High level helper that reads from input and writes to output, processing the image as described
 /// by options. Intended for use in an asset pipeline. Feel free to fork this function into your
 /// codebase if you need to customize it further, it only calls into the public API.
@@ -40,77 +38,29 @@ pub fn process(
     input: *std.Io.Reader,
     output: *std.Io.Writer,
     options: Options,
-) error{
-    ReadFailed,
-    EndOfStream,
-    OutOfMemory,
-    StbImageFailure,
-    StreamTooLong,
-    WrongColorSpace,
-    InvalidOption,
-    EncoderFailed,
-    WriteFailed,
-    StbResizeFailure,
-}!void {
+) !void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    // const encoding_options: Image.EncodeOptions = switch (encoding) {
-    //     .bc7 => |eo| b: {
-    //         const bc7: Image.Bc7Options = .{
-    //             .uber_level = eo.named.uber,
-    //             .reduce_entropy = eo.named.@"reduce-entropy",
-    //             .max_partitions_to_scan = eo.named.@"max-partitions-to-scan",
-    //             .mode_6_only = eo.named.@"mode-6-only",
-    //             .rdo = if (eo.subcommand) |subcommand| switch (subcommand) {
-    //                 .rdo => |rdo| .{
-    //                     .lambda = rdo.named.lambda,
-    //                     .lookback_window = rdo.named.@"lookback-window",
-    //                     .smooth_block_error_scale = rdo.named.@"smooth-block-error-scale",
-    //                     .quantize_mode_6_endpoints = rdo.named.@"quantize-mode-6-endpoints",
-    //                     .weight_modes = rdo.named.@"weight-modes",
-    //                     .weight_low_frequency_partitions = rdo.named.@"weight-low-frequency-partitions",
-    //                     .pbit1_weighting = rdo.named.@"pbit1-weighting",
-    //                     .max_smooth_block_std_dev = rdo.named.@"max-smooth-block-std-dev",
-    //                     .try_two_matches = rdo.named.@"try-two-matches",
-    //                     .ultrasmooth_block_handling = rdo.named.@"ultrasmooth-block-handling",
-    //                 },
-    //             } else null,
-    //         };
-    //         break :b switch (eo.named.@"color-space") {
-    //             .srgb => .{ .bc7_srgb = bc7 },
-    //             .linear => .{ .bc7 = bc7 },
-    //         };
-    //     },
-    //     .@"rgba-u8" => |eo| switch (eo.named.@"color-space") {
-    //         .linear => .rgba_u8,
-    //         .srgb => .rgba_srgb_u8,
-    //     },
-    //     .@"rgba-f32" => .rgba_f32,
-    // };
-    const encoding_tag: Image.Encoding = options.encoding;
-
+    // Create the texture
     var texture: Texture = .{};
     defer texture.deinit();
 
-    // XXX: size?
-    // XXX: make sure we flush writers!
+    // Append the first level
+    const encoding: Image.Encoding = options.encoding;
     texture.appendLevel(try Image.rgbaF32InitFromReader(
         gpa,
         input,
         .{
-            // XXX: a little weird that this arg is here, alos other should be named/have default...
-            .color_space = encoding_tag.colorSpace(),
+            .color_space = encoding.colorSpace(),
             .alpha = if (options.preserve_alpha_coverage) |pac|
                 .{ .alpha_test = .{ .threshold = pac.alpha_test } }
             else
                 .opacity,
         },
     )) catch @panic("OOB");
-    // XXX: maybe we DO want to set filters/address mode on the texture once up front to make less verbose?
-    // note that we resize the first level via a getter so would need a wrapper for that for that to be doable
-    // with the params
-    // Resize the image if requested
+
+    // Resize the first level
     try texture.levels()[0].rgbaF32ResizeToFit(.{
         .max_size = options.max.size,
         .max_width = options.max.width,
@@ -120,20 +70,27 @@ pub fn process(
         .filter_u = options.filter.u,
         .filter_v = options.filter.v,
     });
-    // XXX: this should be optional, test in viewer
+
+    // Generate mipmaps if requested
     if (options.generate_mipmaps) {
         try texture.rgbaF32GenerateMipmaps(.{
             .filter_u = options.filter.u,
             .filter_v = options.filter.v,
             .address_mode_u = options.address_mode.u,
             .address_mode_v = options.address_mode.v,
-            .block_size = encoding_tag.blockSize(),
+            .block_size = encoding.blockSize(),
         });
     }
+
+    // Encode the texture
     try texture.rgbaF32Encode(gpa, null, options.encoding);
+
+    // Compress the texture if requested
     if (options.zlib) |zlib_options| {
         try texture.compressZlib(gpa, zlib_options);
     }
+
+    // Write the texture to Ktx2 and flush
     try texture.writeKtx2(output);
     try output.flush();
 }

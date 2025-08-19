@@ -142,13 +142,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
         const header_zone = Zone.begin(.{ .name = "header", .src = @src() });
         defer header_zone.end();
         try writer.writeStruct(Ktx2.Header{
-            .format = switch (encoding) {
-                .rgba_u8 => .r8g8b8a8_uint,
-                .rgba_srgb_u8 => .r8g8b8a8_srgb,
-                .rgba_f32 => .r32g32b32a32_sfloat,
-                .bc7 => .bc7_unorm_block,
-                .bc7_srgb => .bc7_srgb_block,
-            },
+            .format = encoding.vkFormat(),
             .type_size = encoding.typeSize(),
             .pixel_width = first_level.width,
             .pixel_height = first_level.height,
@@ -163,15 +157,14 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
 
     // Write the level index
     const level_alignment: u8 = if (supercompression != .none) 1 else switch (encoding) {
-        .rgba_u8, .rgba_srgb_u8 => 4,
-        .rgba_f32 => 16,
-        .bc7, .bc7_srgb => 16,
+        .r8g8b8a8_unorm, .r8g8b8a8_srgb => 4,
+        .r32g32b32_sfloat => 16,
+        .bc7_unorm_block, .bc7_srgb_block => 16,
     };
     {
         const level_index_zone = Zone.begin(.{ .name = "level index", .src = @src() });
         defer level_index_zone.end();
 
-        // XXX: stop saying "unmanaged", don't need to anymore
         // Calculate the byte offsets, taking into account that KTX2 requires mipmaps be stored from
         // largest to smallest for streaming purposes
         var byte_offsets_reverse_buf: [Ktx2.max_levels]usize = undefined;
@@ -206,8 +199,8 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
         try writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock{
             .descriptor_block_size = Ktx2.BasicDescriptorBlock.descriptorBlockSize(samples),
             .model = switch (encoding) {
-                .rgba_u8, .rgba_srgb_u8, .rgba_f32 => .rgbsda,
-                .bc7, .bc7_srgb => .bc7,
+                .r8g8b8a8_unorm, .r8g8b8a8_srgb, .r32g32b32_sfloat => .rgbsda,
+                .bc7_unorm_block, .bc7_srgb_block => .bc7,
             },
             .primaries = .bt709,
             .transfer = switch (encoding.colorSpace()) {
@@ -222,9 +215,9 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
             .texel_block_dimension_2 = .fromInt(1),
             .texel_block_dimension_3 = .fromInt(1),
             .bytes_plane_0 = if (supercompression != .none) 0 else switch (encoding) {
-                .rgba_u8, .rgba_srgb_u8 => 4,
-                .rgba_f32 => 16,
-                .bc7, .bc7_srgb => 16,
+                .r8g8b8a8_unorm, .r8g8b8a8_srgb => 4,
+                .r32g32b32_sfloat => 16,
+                .bc7_unorm_block, .bc7_srgb_block => 16,
             },
             .bytes_plane_1 = 0,
             .bytes_plane_2 = 0,
@@ -235,7 +228,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
             .bytes_plane_7 = 0,
         })[0 .. @bitSizeOf(Ktx2.BasicDescriptorBlock) / 8]);
         switch (encoding) {
-            .rgba_u8, .rgba_srgb_u8 => for (0..4) |i| {
+            .r8g8b8a8_unorm, .r8g8b8a8_srgb => for (0..4) |i| {
                 const ChannelType = Ktx2.BasicDescriptorBlock.Sample.ChannelType(.rgbsda);
                 const channel_type: ChannelType = if (i == 3) .alpha else @enumFromInt(i);
                 writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
@@ -260,7 +253,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
                     },
                 })) catch unreachable;
             },
-            .rgba_f32 => for (0..4) |i| {
+            .r32g32b32_sfloat => for (0..4) |i| {
                 const ChannelType = Ktx2.BasicDescriptorBlock.Sample.ChannelType(.rgbsda);
                 const channel_type: ChannelType = if (i == 3) .alpha else @enumFromInt(i);
                 writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
@@ -279,7 +272,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
                     .upper = @bitCast(@as(f32, 1.0)),
                 })) catch unreachable;
             },
-            .bc7, .bc7_srgb => {
+            .bc7_unorm_block, .bc7_srgb_block => {
                 const ChannelType = Ktx2.BasicDescriptorBlock.Sample.ChannelType(.bc7);
                 const channel_type: ChannelType = .data;
                 writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
@@ -320,4 +313,6 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
             byte_offset += compressed_level.buf.len;
         }
     }
+
+    try writer.flush();
 }
