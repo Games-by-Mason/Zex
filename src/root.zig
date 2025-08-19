@@ -7,7 +7,7 @@ const Zone = tracy.Zone;
 pub const Image = @import("Image.zig");
 pub const Texture = @import("Texture.zig");
 
-pub const ProcessOptions = struct {
+pub const Options = struct {
     encoding: Image.EncodeOptions = .rgba_u8,
     preserve_alpha_coverage: ?struct {
         alpha_test: f32 = 0.5,
@@ -39,7 +39,7 @@ pub fn process(
     gpa: Allocator,
     input: *std.Io.Reader,
     output: *std.Io.Writer,
-    options: ProcessOptions,
+    options: Options,
 ) error{
     ReadFailed,
     EndOfStream,
