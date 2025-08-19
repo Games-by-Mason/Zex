@@ -43,7 +43,6 @@ pub const GenerateMipMapsOptions = struct {
     filter: Image.Filter = .mitchell,
     filter_u: ?Image.Filter = null,
     filter_v: ?Image.Filter = null,
-    // XXX: allow limiting count, and calculating optimal count for final encoding instead?
     block_size: u8,
 
     fn filterU(self: @This()) Image.Filter {
@@ -63,7 +62,6 @@ pub fn rgbaF32GenerateMipmaps(self: *@This(), options: GenerateMipMapsOptions) I
     const source = self.levels()[0];
     source.assertIsUncompressedRgbaF32();
 
-    // XXX: do we really need this iterator to be built into image?
     var generate_mipmaps = source.rgbaF32GenerateMipmaps(.{
         .address_mode_u = options.address_mode_u,
         .address_mode_v = options.address_mode_v,
@@ -100,7 +98,6 @@ pub fn compressZlib(
     }
 }
 
-// XXX: assert levels are right size, and encoded/compressed the same way, document
 pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
     const zone = Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -114,13 +111,11 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
         var level_width = first_level.width;
         var level_height = first_level.height;
         for (self.levelsConst()) |level| {
-            // XXX: be consistent with panics vs asserts, may want to use panics here so that we can do
-            // release fast to elide expensive in loop checks but still check cheap interface guarantees
             assert(level.encoding == encoding);
             assert(level.supercompression == supercompression);
             assert(level.premultiplied == premultiplied);
-            // XXX: check against block size?
-            assert(level.width > 0 and level.height > 0);
+            const block_size = level.encoding.blockSize();
+            assert(level.width >= block_size and level.height >= block_size);
             assert(level.width == level_width);
             assert(level.height == level_height);
 

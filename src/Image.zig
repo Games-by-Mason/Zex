@@ -496,8 +496,6 @@ pub const GenerateMipMapsOptions = struct {
     filter_v: Filter,
 };
 
-// XXX: move this logic to texture, document, and set max amount instead of block size, but assert
-// on write that we got it right, and allow calculating max from block size
 pub fn rgbaF32GenerateMipmaps(self: Image, options: GenerateMipMapsOptions) GenerateMipmaps {
     self.assertIsUncompressedRgbaF32();
     return .{
@@ -605,10 +603,8 @@ pub fn rgbaF32PreserveAlphaCoverage(self: Image, max_steps: u8) void {
     }
 }
 
-// XXX: clean up usages of this and document
 pub fn toOwned(self: *Image) Image {
     const owned: Image = self.*;
-    // XXX: do we really need to clear this stuff? could just clear the data
     self.width = 0;
     self.height = 0;
     self.buf = &.{};
@@ -626,10 +622,6 @@ pub const EncodeOptions = union(Encoding) {
 
 pub const EncodeError = EncodeRgbaU8Error || EncodeBc7Error;
 
-// XXX: do we really need the general function for this? alternatively, do we really need the specific ones
-// to be public? we only expose the general one on texture cause less boilerplate. if we get rid of
-// the other ones publically, then we can consider name order again.
-// XXX: make an encode function on texture that encodes all its levels
 /// Transcodes from rgba-f32 to the given encoding.
 pub fn rgbaF32Encode(
     self: *@This(),
@@ -967,7 +959,6 @@ pub const CompressZlibOptions = union(enum) {
     level: Level,
 };
 
-// XXX: make helper that dispatches to given one? don't think that's needed, remove from encode too?
 pub const CompressZlibError = Allocator.Error || std.Io.Writer.Error;
 
 pub fn compressZlib(
@@ -1015,7 +1006,7 @@ pub fn compressZlib(
     }
     compressed.items.len = compressed_len;
 
-    const original = self.*; // XXX: annoying needing to do this
+    const original = self.*;
     self.deinit();
     self.* = .{
         .width = original.width,

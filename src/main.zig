@@ -111,7 +111,6 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
-// XXX: make library for this or no?
 fn logFn(
     comptime message_level: std.log.Level,
     comptime _: @TypeOf(.enum_literal),
