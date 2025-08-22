@@ -1,23 +1,29 @@
 .{
-    .name = "tex",
+    .name = .zex,
+    .fingerprint = 0xe07352783aba7305,
     .version = "0.0.0",
-    .minimum_zig_version = "0.14.0-dev.1820+ea527f7a8",
+    .minimum_zig_version = "0.15.0-dev.1564+2761cc8be",
     .dependencies = .{
         .bc7enc_rdo = .{
             // Mirror available: https://github.com/Games-by-Mason/bc7enc_rdo
             .url = "https://github.com/richgel999/bc7enc_rdo/archive/e6990bc11829c072d9f9e37296f3335072aab4e4.tar.gz",
-            .hash = "122015b6b9371467091eefd4720d363feea707bc700d2676bda2fe2b55629a18b435",
-            .lazy = true,
+            .hash = "N-V-__8AAJeObgIVtrk3FGcJHu_Ucg02P-6nB7xwDSZ2vaL-",
         },
         .structopt = .{
-            .url = "https://github.com/Games-by-Mason/structopt/archive/5d51b7e808a795a6bc676b299d7b984a323a98d5.tar.gz",
-            .hash = "122092841f6dc466efaf948fbabbcffc84e70da9f4bce59df216b986eb23a78f3054",
-            .lazy = true,
+            .url = "git+https://github.com/Games-By-Mason/structopt#ca000425f5e1828221ca858dd97a3b407e48be9e",
+            .hash = "structopt-1.0.0-OgtKAiE4AQCpaGqYCWS5aKYlzoeZLQxTAQH8EQJvyS7P",
         },
         .stb = .{
             .url = "https://github.com/nothings/stb/archive/5c205738c191bcb0abc65c4febfa9bd25ff35234.tar.gz",
-            .hash = "122082911aadaef3c836d3833f7c60386ee1ee46feffb6c54785f784801c32212aaa",
-            .lazy = true,
+            .hash = "N-V-__8AAAokTgCCkRqtrvPINtODP3xgOG7h7kb-_7bFR4X3",
+        },
+        .tracy = .{
+            .url = "git+https://github.com/Games-By-Mason/tracy_zig#1cb0471b169637ebfc0a4f5ce827a3502412e564",
+            .hash = "tracy-0.0.0-R7l8BVxEAQDC2E_f6SlQZy5_4BAI2klvP5equvriL47a",
+        },
+        .zlib = .{
+            .url = "git+https://github.com/allyourcodebase/zlib#8a8161babd4b79ea47d5a5976337a96ac4a5666b",
+            .hash = "zlib-1.3.1-ZZQ7lbYMAAAuaZnFj2675ah508w1Oc-EuY1V1cWJka2C",
         },
     },
     .paths = .{
