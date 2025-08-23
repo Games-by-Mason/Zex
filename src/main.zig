@@ -3,6 +3,8 @@ const log = std.log;
 const assert = std.debug.assert;
 const structopt = @import("structopt");
 const zex = @import("zex");
+const zon = @import("zon.zig");
+
 pub const tracy = @import("tracy");
 
 pub const tracy_impl = @import("tracy_impl");
@@ -16,15 +18,12 @@ const command: Command = .{
     .named_args = &.{
         .init([]const u8, .{
             .long = "input",
-            .short = 'i',
         }),
-        .init([]const u8, .{
+        .initAccum([]const u8, .{
             .long = "config",
-            .short = 'c',
         }),
         .init([]const u8, .{
             .long = "output",
-            .short = 'o',
         }),
     },
 };
@@ -55,41 +54,56 @@ pub fn main() !void {
     var input_buf: [128]u8 = undefined;
     var input = input_file.readerStreaming(&input_buf);
 
-    var config_file = cwd.openFile(args.named.config, .{}) catch |err| {
-        log.err("{s}: {s}", .{ args.named.config, @errorName(err) });
-        std.process.exit(1);
-    };
-    defer config_file.close();
+    // Read the config file(s)
+    var config: zex.Texture.Options = .{};
+    for (args.named.config.items) |path| {
+        // Get the config source file
+        const file = cwd.openFile(path, .{}) catch |err| {
+            log.err("{s}: {s}", .{ path, @errorName(err) });
+            std.process.exit(1);
+        };
+        defer file.close();
 
-    var config_buf: [128]u8 = undefined;
-    var config_reader = config_file.readerStreaming(&config_buf);
-    const config_zon = b: {
-        var config_zon: std.ArrayList(u8) = .{};
-        errdefer config_zon.deinit(allocator);
-        try config_reader.interface.appendRemainingUnlimited(
+        // Get the file source
+        const src = b: {
+            var buf: [4096]u8 = undefined;
+            var file_reader = file.readerStreaming(&buf);
+            var src_list: std.ArrayList(u8) = .{};
+            defer src_list.deinit(allocator);
+            try file_reader.interface.appendRemainingUnlimited(allocator, .of(u8), &src_list, 64);
+            break :b try src_list.toOwnedSliceSentinel(allocator, 0);
+        };
+        defer allocator.free(src);
+
+        // Parse the ZON and update the config
+        var diag: zon.Diagnostics = .{};
+        defer diag.deinit(allocator);
+        config = zon.fromSliceDefaults(
+            zex.Texture.Options,
             allocator,
-            .of(u8),
-            &config_zon,
-            config_buf.len,
-        );
-        break :b try config_zon.toOwnedSliceSentinel(allocator, 0);
-    };
-    defer allocator.free(config_zon);
-    var diag: std.zon.parse.Diagnostics = .{};
-    defer diag.deinit(allocator);
-    const config = std.zon.parse.fromSlice(
-        zex.Options,
+            src,
+            &diag,
+            &config,
+            .{},
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ParseZon => {
+                log.err("{s}: {f}", .{ path, diag });
+                std.process.exit(1);
+            },
+        };
+    }
+
+    // Create the texture
+    var texture = zex.Texture.init(
         allocator,
-        config_zon,
-        &diag,
-        .{},
+        &input.interface,
+        config,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.ParseZon => {
-            log.err("{s}: {f}", .{ args.named.config, diag });
-            std.process.exit(1);
-        },
+        else => std.process.exit(1),
     };
+    defer texture.deinit();
 
     var output_file = cwd.createFile(args.named.output, .{}) catch |err| {
         log.err("{s}: {s}", .{ args.named.output, @errorName(err) });
@@ -100,10 +114,12 @@ pub fn main() !void {
         output_file.close();
     }
 
-    var output_buf: [128]u8 = undefined;
+    var output_buf: [4096]u8 = undefined;
     var output = output_file.writerStreaming(&output_buf);
 
-    try zex.process(allocator, &input.interface, &output.interface, config);
+    // Write the texture
+    try texture.writeKtx2(&output.interface);
+    try output.interface.flush();
 }
 
 pub const std_options: std.Options = .{
@@ -143,4 +159,8 @@ fn logFn(
         stderr.print(format ++ "\n", args) catch return;
         stderr.writeAll(reset) catch return;
     }
+}
+
+test {
+    _ = @import("zon.zig");
 }
