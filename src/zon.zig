@@ -1,12 +1,7 @@
 //! This is a fork of the standard library's ZON parser that adds the ability to update existing
 //! objects. If it works well, I'll make a PR upstreaming this idea.
 //!
-//! WIP:
-//! - Consider adding the option to recursively dup default values for easier freeing
-//!     - Either way, add the appropriate explanation to the docs and recommend arena style alloc
-//! - I made the defaults method an alternate variant so I wouldn't have to update all the tests for
-//!   now. Long term I should decide whether to do this or add an extra arg to the existing methods.
-//!   If we keep it separate, then consider making the arg non optional.
+//! More info: https://github.com/Games-by-Mason/Zex/issues/22
 
 const std = @import("std");
 const builtin = @import("builtin");
