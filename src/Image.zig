@@ -977,7 +977,7 @@ pub fn compressZlib(
     const zlib_zone = Zone.begin(.{ .name = "zlib", .src = @src() });
     defer zlib_zone.end();
 
-    var compressed_len = c.compressBound(self.buf.len);
+    var compressed_len = c.compressBound(@intCast(self.buf.len));
 
     var compressed = b: {
         const alloc_zone = Zone.begin(.{ .name = "alloc", .src = @src() });
@@ -990,7 +990,7 @@ pub fn compressZlib(
         compressed.items.ptr,
         &compressed_len,
         self.buf.ptr,
-        self.buf.len,
+        @intCast(self.buf.len),
         @intFromEnum(options.level),
     )) {
         c.Z_OK => {},

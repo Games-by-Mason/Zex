@@ -70,7 +70,7 @@ pub fn main() !void {
             var file_reader = file.readerStreaming(&buf);
             var src_list: std.ArrayList(u8) = .{};
             defer src_list.deinit(allocator);
-            try file_reader.interface.appendRemainingUnlimited(allocator, .of(u8), &src_list, 64);
+            try file_reader.interface.appendRemainingUnlimited(allocator, &src_list);
             break :b try src_list.toOwnedSliceSentinel(allocator, 0);
         };
         defer allocator.free(src);
