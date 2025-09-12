@@ -706,7 +706,7 @@ pub const Bc7Options = struct {
         max_smooth_block_std_dev: f32 = 18.0,
         try_two_matches: bool = true,
         ultrasmooth_block_handling: bool = true,
-    },
+    } = .{},
 };
 
 pub const EncodeBc7Error = error{ InvalidOption, EncoderFailed };
