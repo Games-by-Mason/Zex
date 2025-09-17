@@ -711,12 +711,12 @@ pub const BasicDescriptorBlock = packed struct(u192) {
     }
 };
 
-pub fn init(bytes: []const u8) Error!@This() {
+pub fn init(bytes: []align(@alignOf(u64)) const u8) Error!@This() {
     comptime assert(builtin.cpu.arch.endian() == .little);
 
     // Parse the header
     if (bytes.len < @sizeOf(Header)) return error.InvalidKtx2;
-    const header: *align(1) const Header = @ptrCast(bytes.ptr);
+    const header: *const Header = @ptrCast(bytes.ptr);
     if (!std.mem.eql(u8, &header.identifier, &identifier)) {
         return error.InvalidKtx2;
     }
