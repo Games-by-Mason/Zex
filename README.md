@@ -22,6 +22,10 @@ This high level strategy is effective, but it's hard to come by tools that make 
 
 In particular, Zig is uniquely suited to make this process easy via its build system which can be extended with tools like Zex to compress textures at build time, automatically providing caching and parallelism.
 
+## Documentation
+
+Documentation available [here](https://docs.gamesbymason.com/zex/), you can generate up to date docs yourself with `zig build docs`.
+
 ## What's Provided
 
 ### Command Line Tool
