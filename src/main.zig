@@ -126,40 +126,6 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
-const Escapes = struct {
-    bold: []const u8,
-    gray: []const u8,
-    err: []const u8,
-    info: []const u8,
-    debug: []const u8,
-    warn: []const u8,
-    reset: []const u8,
-
-    pub fn init(tty_config: std.Io.tty.Config) Escapes {
-        return switch (tty_config) {
-            // XXX: implement windows colors or no?
-            .no_color, .windows_api => .{
-                .bold = "",
-                .gray = "",
-                .reset = "",
-                .err = "",
-                .info = "",
-                .debug = "",
-                .warn = "",
-            },
-            .escape_codes => .{
-                .bold = "\x1b[1m",
-                .gray = "\x1b[90m",
-                .reset = "\x1b[0m",
-                .err = "\x1b[31m",
-                .info = "\x1b[32m",
-                .debug = "\x1b[34m",
-                .warn = "\x1b[33m",
-            },
-        };
-    }
-};
-
 fn logFn(
     comptime message_level: std.log.Level,
     comptime _: @TypeOf(.enum_literal),
@@ -171,23 +137,26 @@ fn logFn(
     var buffer: [64]u8 = undefined;
     var stderr, const tty_config = std.debug.lockStderrWriter(&buffer);
     defer std.debug.unlockStderrWriter();
-
-    const e: Escapes = .init(tty_config);
-    const color = switch (message_level) {
-        inline else => |t| @field(e, @tagName(t)),
-    };
     nosuspend {
         var wrote_prefix = false;
         if (message_level != .info) {
-            stderr.print("{s}{s}{s}{s}", .{ e.bold, color, level_txt, e.reset }) catch return;
+            tty_config.setColor(stderr, .bold) catch {};
+            tty_config.setColor(stderr, switch (message_level) {
+                .err => .red,
+                .warn => .yellow,
+                .info => .green,
+                .debug => .blue,
+            }) catch {};
+            stderr.writeAll(level_txt) catch {};
+            tty_config.setColor(stderr, .reset) catch {};
             wrote_prefix = true;
         }
-        if (message_level == .err) stderr.writeAll(e.bold) catch return;
+        if (message_level == .err) tty_config.setColor(stderr, .bold) catch {};
         if (wrote_prefix) {
             stderr.writeAll(": ") catch return;
         }
         stderr.print(format ++ "\n", args) catch return;
-        stderr.writeAll(e.reset) catch return;
+        tty_config.setColor(stderr, .reset) catch {};
     }
 }
 
