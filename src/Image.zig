@@ -20,6 +20,7 @@ const Zone = tracy.Zone;
 const Ktx2 = @import("Ktx2");
 
 const c = @cImport({
+    @cDefine("STBI_NO_STDIO", "1");
     @cInclude("stb_image.h");
     @cInclude("stb_image_resize2.h");
     @cInclude("zlib.h");
@@ -265,7 +266,7 @@ pub fn assertIsUncompressedRgbaF32(self: Image) void {
 pub fn rgbaF32Samples(self: Image) []f32 {
     self.assertIsUncompressedRgbaF32();
     var f32s: []f32 = undefined;
-    f32s.ptr = @alignCast(@ptrCast(self.buf.ptr));
+    f32s.ptr = @ptrCast(@alignCast(self.buf.ptr));
     f32s.len = self.buf.len / @sizeOf(f32);
     return f32s;
 }

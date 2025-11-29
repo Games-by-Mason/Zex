@@ -2,7 +2,7 @@
     .name = .zex,
     .fingerprint = 0xe07352783aba7305,
     .version = "0.1.0",
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0-dev.1484+d0ba6642b",
     .dependencies = .{
         .bc7enc_rdo = .{
             // Mirror available: https://github.com/Games-by-Mason/bc7enc_rdo
@@ -10,8 +10,8 @@
             .hash = "N-V-__8AAJeObgIVtrk3FGcJHu_Ucg02P-6nB7xwDSZ2vaL-",
         },
         .structopt = .{
-            .url = "git+https://github.com/Games-By-Mason/structopt#ca000425f5e1828221ca858dd97a3b407e48be9e",
-            .hash = "structopt-1.0.0-OgtKAiE4AQCpaGqYCWS5aKYlzoeZLQxTAQH8EQJvyS7P",
+            .url = "git+https://github.com/Games-By-Mason/structopt#d2cba72809f3aa41464e2597371ea45078bfada3",
+            .hash = "structopt-1.0.0-OgtKAng7AQDBL7zVfz0Rz4asvZdmOpjrLS2039TH-owI",
         },
         .stb = .{
             .url = "https://github.com/nothings/stb/archive/5c205738c191bcb0abc65c4febfa9bd25ff35234.tar.gz",
