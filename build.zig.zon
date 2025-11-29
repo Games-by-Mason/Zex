@@ -1,7 +1,7 @@
 .{
     .name = .zex,
     .fingerprint = 0xe07352783aba7305,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
         .bc7enc_rdo = .{

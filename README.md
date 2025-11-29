@@ -26,6 +26,10 @@ In particular, Zig is uniquely suited to make this process easy via its build sy
 
 Documentation available [here](https://docs.gamesbymason.com/zex/), you can generate up to date docs yourself with `zig build docs`.
 
+## Which version of Zig is targeted?
+
+See [build.zig.con](/build.zig.zon). For previous Zig versions, see [releases](https://github.com/Games-by-Mason/zex/releases).
+
 ## What's Provided
 
 ### Command Line Tool
@@ -66,4 +70,4 @@ I recommend [Tacent View](https://github.com/bluescan/tacentview) for inspecting
 
 ## Zex is a work in progress
 
-See the issues tracker for features that are tentatively planned but currently missing.
+See the issues tracker for features that are planned but currently missing.
