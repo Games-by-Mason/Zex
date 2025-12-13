@@ -244,7 +244,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
         defer level_index_zone.end();
 
         // Calculate the byte offsets, taking into account that KTX2 requires mipmaps be stored from
-        // largest to smallest for streaming purposes
+        // smallest to largest for streaming purpose, but the index is in the expected order.
         var byte_offsets_reverse_buf: [Ktx2.max_levels]usize = undefined;
         var byte_offsets_reverse: std.ArrayList(usize) = .initBuffer(&byte_offsets_reverse_buf);
         {
@@ -309,7 +309,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
             .r8g8b8a8_unorm, .r8g8b8a8_srgb => for (0..4) |i| {
                 const ChannelType = Ktx2.BasicDescriptorBlock.Sample.ChannelType(.rgbsda);
                 const channel_type: ChannelType = if (i == 3) .alpha else @enumFromInt(i);
-                writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
+                try writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
                     .bit_offset = .fromInt(8 * @as(u16, @intCast(i))),
                     .bit_length = .fromInt(8),
                     .channel_type = @enumFromInt(@intFromEnum(channel_type)),
@@ -329,12 +329,12 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
                         .hdr => 1,
                         .srgb, .linear => 255,
                     },
-                })) catch unreachable;
+                }));
             },
             .r32g32b32_sfloat => for (0..4) |i| {
                 const ChannelType = Ktx2.BasicDescriptorBlock.Sample.ChannelType(.rgbsda);
                 const channel_type: ChannelType = if (i == 3) .alpha else @enumFromInt(i);
-                writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
+                try writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
                     .bit_offset = .fromInt(32 * @as(u16, @intCast(i))),
                     .bit_length = .fromInt(32),
                     .channel_type = @enumFromInt(@intFromEnum(channel_type)),
@@ -348,12 +348,12 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
                     .sample_position_3 = 0,
                     .lower = @bitCast(@as(f32, -1.0)),
                     .upper = @bitCast(@as(f32, 1.0)),
-                })) catch unreachable;
+                }));
             },
             .bc7_unorm_block, .bc7_srgb_block => {
                 const ChannelType = Ktx2.BasicDescriptorBlock.Sample.ChannelType(.bc7);
                 const channel_type: ChannelType = .data;
-                writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
+                try writer.writeAll(std.mem.asBytes(&Ktx2.BasicDescriptorBlock.Sample{
                     .bit_offset = .fromInt(0),
                     .bit_length = .fromInt(128),
                     .channel_type = @enumFromInt(@intFromEnum(channel_type)),
@@ -367,7 +367,7 @@ pub fn writeKtx2(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void
                     .sample_position_3 = 0,
                     .lower = 0,
                     .upper = std.math.maxInt(u32),
-                })) catch unreachable;
+                }));
             },
         }
     }

@@ -108,10 +108,7 @@ pub fn main() !void {
         log.err("{s}: {s}", .{ args.named.output, @errorName(err) });
         std.process.exit(1);
     };
-    defer {
-        output_file.sync() catch |err| @panic(@errorName(err));
-        output_file.close();
-    }
+    defer output_file.close();
 
     var output_buf: [4096]u8 = undefined;
     var output = output_file.writerStreaming(&output_buf);
