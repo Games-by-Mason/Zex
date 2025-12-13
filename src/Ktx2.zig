@@ -30,6 +30,13 @@ pub const Header = extern struct {
     supercompression_scheme: SupercompressionScheme,
     index: Index,
 
+    comptime {
+        // Since we're serializing this type to disk, we don't want any implicit padding. Implicit
+        // padding may vary target to target, and additionally, can result in otherwise identically
+        // files not being bitwise identical. Any necessary padding should be made explicit.
+        assertNoPadding(Header);
+    }
+
     pub const VkFormat = enum(u32) {
         undefined = 0,
         r4g4_unorm_pack8 = 1,
@@ -854,4 +861,26 @@ pub fn levelBytes(self: *const @This(), index: u8) ?[]const u8 {
 
     const all_bytes: [*]const u8 = @ptrCast(self.header);
     return all_bytes[level.byte_offset..][0..level.byte_length];
+}
+
+fn assertNoPadding(T: type) void {
+    switch (@typeInfo(T)) {
+        .int, .float, .bool => {},
+        .array => |a| assertNoPadding(a.child),
+        .@"struct" => |s| {
+            // Check that all our field types don't have padding
+            for (s.fields) |field| {
+                assertNoPadding(field.type);
+            }
+
+            // Check that we have no padding
+            comptime var size: usize = 0;
+            for (@typeInfo(T).@"struct".fields) |field| {
+                size += @sizeOf(field.type);
+            }
+            assert(size == @sizeOf(T));
+        },
+        .@"enum" => {},
+        else => unreachable,
+    }
 }
